@@ -1,0 +1,2794 @@
+---
+title: "Dung and Parasite Analyses"
+author: "Georgia Titcomb"
+date: "December 15, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(lmerTest)
+library(sjPlot)
+library(DHARMa)
+library(boot)
+library(glmmTMB)
+library(car)
+library(Rmisc)
+library(emmeans)
+library(multcomp)
+
+```
+
+Set Analysis Type Here:
+```{r}
+
+# For a (quicker) demonstration, run: FULL_ANALYSIS = FALSE and DEMO_ANALYSIS = TRUE
+# For full analysis, run: FULL_ANALYSIS = TRUE and DEMO_ANALYSIS = FALSE
+
+FULL_ANALYSIS = FALSE
+DEMO_ANALYSIS = TRUE
+
+```
+
+# Ol Pejeta Experiment
+
+## Import data
+
+```{r}
+## Volume conversions for the datasets were calculated using:
+## http://www.scielo.br/pdf/mioc/v98s1/v98s1a14.pdf
+
+OPC = read.csv("OPCdata.csv")
+
+# Calculate total volume
+OPClong = gather(OPC, Elephant, Cow, Buffalo, Zebra, Impala, Giraffe, key=Species, value=Total)
+
+# View proportion of volume by each species
+# Note that count proportions are different
+newOPC = OPClong %>% group_by(Species) %>% summarize_at(vars(Total), funs(mean(., na.rm=T)))
+
+OPCpie = ggplot(newOPC, aes(x="", y=Total, fill=reorder(Species,Total)))+
+geom_bar(width = 1, stat = "identity")+
+  labs(x="Dung density (cm3 per m2)")+
+  coord_polar("y", start=0)+
+  scale_fill_manual(values=rev(c("green3","dodgerblue4","maroon3","dodgerblue","goldenrod","dodgerblue3")))+
+  theme_bw(base_size=20)
+OPCpie
+
+```
+
+## All Animals
+
+```{r}
+
+# Sum Together
+OPC$all = OPC$Elephant+OPC$Zebra+OPC$Giraffe+OPC$Cow+OPC$Buffalo+OPC$Impala
+
+# Calculate the mean when two sides of the transect were sampled
+# Convert to wide
+OPCw = OPC[,c(1:8,21)] %>% spread(key=Side, value=all)
+
+# To calculate mean, if side 1 is NA, then set as side 0, if not, then set as average of the two sides
+OPCw$mean = ifelse(is.na(OPCw$`1`),OPCw$`0`,(OPCw$`0`+OPCw$`1`)/2)
+
+# Aggregate over transect: this is the average dung volume per m^2 (n=6)
+OPCagg = OPCw%>%group_by(Period, Status, Treatment, Site, Distance)%>%summarize_at(vars(mean), funs(mean))
+OPCagg$mean_3 = OPCagg$mean^(1/3)
+
+# Order the time groupings
+OPCagg$Status = factor(OPCagg$Status, levels=c("Pre", "During", "Post"))
+
+#head(OPC)
+```
+
+### Fitting
+Here we use zero-inflated models
+
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit model comparing the experimental pans
+OPagg_EXPT = OPCagg[-which(OPCagg$Treatment=="CONT"),]
+
+# Transformations
+OPagg_EXPT$mean_3 = OPagg_EXPT$mean^(1/3)
+OPagg_EXPT$mean_4 = ifelse(OPagg_EXPT$mean == 0, 0, log(OPagg_EXPT$mean))
+
+# Fit model
+
+#tmbmod = glmmTMB(mean_3 ~ Status*Distance*Treatment+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+#tmbmod = glmmTMB(mean_4 ~ Status*Distance*Treatment+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+
+# Assess model
+#summary(tmbmod)
+#Anova(tmbmod, type=3)
+
+# Drop full interaction
+tmbmod2 = glmmTMB(mean_3 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+#tmbmod3 = glmmTMB(mean_4 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+
+# Compare transformations
+#bbmle::AICctab(tmbmod2, tmbmod3)
+#summary(tmbmod2)
+
+# View diagnostics
+testResiduals(simulateResiduals(tmbmod2))
+
+# View summary
+tab_model(tmbmod2, show.stat=T, show.se=T)
+Anova(tmbmod2, type=3)
+
+
+ggplot(OPCagg[which(OPCagg$mean>0),], aes(x=Distance,y=mean^(1/3)))+
+  geom_point(aes(col=Treatment),alpha=0.3)+
+  geom_smooth(aes(col=Treatment,fill=Treatment),method="lm",formula=y~sqrt(x))+
+  facet_wrap(~Status)+
+  theme_bw()
+
+
+# Log Ratio Plot
+# convert to wide format
+wid = OPCagg %>% pivot_wider(names_from=Treatment, values_from=mean, -mean_3)
+# calculate log ration with correction for zeroes
+wid$lr = log(wid$WPC+1)-log(wid$WPM+1)
+# aggregate for plotting purposes
+widag = wid %>% group_by(Status, Distance) %>% summarize_at(vars(CONT:WPM,lr), funs(mean))
+
+CPCOLS <- c("#2A5675", "#42B889", "#1F6CAB")
+
+alldungopcplot = ggplot(widag, aes(x=Distance, y=lr))+
+  geom_point(aes(col=Status), size=4, shape=2, stroke=2)+
+  geom_smooth(aes(col=Status, fill=Status), method="lm",formula=y~log(x+1), se=T,  size=2)+
+  scale_color_manual(values=CPCOLS)+
+  scale_fill_manual(values=CPCOLS)+
+  facet_wrap(~Status)+
+  guides(col=F,  fill=F)+
+  geom_hline(yintercept=0)+
+  theme_bw(base_size=20)+
+  labs(x="Outward Distance (m)", y="Dung Density Log-Ratio (Filled vs Drained)")
+
+alldungopcplot
+
+```
+
+### Post hoc comparisons
+
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+# Traditional posthoc tests
+postem = emmeans(tmbmod2, ~Treatment|Status+Distance)
+postemz = emmeans(tmbmod2, ~Treatment|Status+Distance, component="zi")
+
+postc = as.data.frame(cld(postem, Letters = LETTERS, reversed = T))
+postz = as.data.frame(cld(postemz, Letters = LETTERS, reversed = T))
+
+# Zero-inflated component
+ggplot(postz, aes(x=Treatment, y=emmean))+
+  geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=0.5)+
+  geom_point()+
+  geom_text(aes(label=.group, y=max(upper.CL+0.5)))+
+  facet_wrap(~Status)
+
+# Conditional component
+ggplot(postc, aes(x=Treatment, y=emmean))+
+  geom_errorbar(aes(ymin=lower.CL, ymax=upper.CL), width=0.5)+
+  geom_point()+
+  geom_text(aes(label=.group, y=max(upper.CL+0.5)))+
+  facet_wrap(~Status)
+
+# With updates for transformation
+my.rg = update(ref_grid(tmbmod2), tran = make.tran("power", 1/3))
+emall = emmeans(my.rg, ~Treatment|Status*Distance, type = "response")
+cld(emall)
+
+# Double pairwise comparison
+pairs(pairs(emmeans(tmbmod2, ~Treatment|Status)), by=NULL, adjust="fdr")
+pairs(pairs(emmeans(tmbmod2, ~Treatment|Status, component="zi")), by=NULL, adjust="fdr")
+
+
+```
+
+
+### Test for differences between WPC and CONT
+
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Does the relationship WPC and CONT change based on experiment status?
+OPagg_CONT = OPCagg[-which(OPCagg$Treatment=="WPM"),]
+OPagg_CONT$mean_3 = OPagg_CONT$mean^(1/3)
+
+WPCmod = glmmTMB(mean_3 ~ Status*Treatment +log(Distance+1)*Treatment+ (1|Site) + (1|Period), ziformula = ~., data=OPagg_CONT)
+
+Anova(WPCmod,type=3)
+tab_model(WPCmod)
+
+testResiduals(simulateResiduals(WPCmod))
+
+```
+
+### Gather results and plot
+
+````{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+allmeans <- Rmisc::summarySE(OPCagg[which(OPCagg$mean>0),], groupvars=c("Treatment","Distance","Status"), measurevar="mean")
+OPCagg$bin = ifelse(OPCagg$mean_3>0,1,0)
+
+CPCOLS <- c( "orangered", "#2A5675","dodgerblue")
+CPCOLS2 = c("orangered", "black", "gray60")
+
+OPCdung_bin = ggplot(OPCagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=2)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=CPCOLS2)+
+  scale_fill_manual(values=CPCOLS2)+
+  facet_wrap(~Status)+
+  theme(plot.margin=unit(c(-0.15, 1, 1, 1),"cm"), strip.background = element_blank(), strip.text.x = element_blank())+
+  guides(col=F,fill=F, shape=F)+
+  labs(x="Distance (m)", y=bquote("Dung Probability"/6*m^2))
+
+allOPCdung = ggplot(allmeans, aes(x=Distance, y=mean))+
+  geom_smooth(method="lm",aes(col=Treatment, fill=Treatment), alpha=0.2, formula=y~log(x+1))+
+  geom_point(aes(col=Treatment), shape=2,size=1.5, stroke=1.5)+
+  facet_wrap(~Status)+
+  scale_color_manual(values=CPCOLS)+
+  scale_fill_manual(values=CPCOLS)+
+  theme_bw(base_size=20)+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,1,0,1.1),"cm"), axis.title.x = element_blank())+
+  labs(x="Outward Distance (m)", y=bquote("Dung Density "*cm^3/m^2))+
+  guides(fill=F, col=F)
+
+alldungopcplot = gridExtra::grid.arrange(allOPCdung, OPCdung_bin, ncol=1)
+
+```
+
+
+# Individual Animals
+
+## Elephants
+
+### Setup
+```{r}
+
+# Isolating Elephant data
+OPCw = OPC[,c(1:8,15)] %>% 
+  spread(key=Side, value=Elephant)
+
+# As before, if two measurements were taken at the same distance, take average
+OPCw$mean = ifelse(is.na(OPCw$`1`),OPCw$`0`,(OPCw$`0`+OPCw$`1`)/2)
+
+# Aggregate over transect
+OPCagg = OPCw %>%
+  group_by(Period, Status, Treatment, Site, Distance) %>%
+  summarize_at(vars(mean), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+# Cube root transformation
+OPCagg$mean_3 = OPCagg$mean^(1/3)
+
+# Reorder levels of the factor
+OPCagg$Status = factor(OPCagg$Status, levels=c("Pre", "During", "Post"))
+
+```
+
+### Fitting
+
+```{r}
+# Fit full model
+OPagg_EXPT = OPCagg[-which(OPCagg$Treatment=="CONT"),]
+
+#tmbmod_ele = glmmTMB(mean_3 ~ Status*log(Distance+1)*Treatment+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+#summary(tmbmod_ele)
+
+# Drop interaction
+tmbmod_ele2 = glmmTMB(mean_3 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+
+#bbmle::AICctab(tmbmod_ele,tmbmod_ele2) # simpler model is better
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_ele2))
+
+# View summary
+tab_model(tmbmod_ele2)
+
+```
+
+### Post Hoc
+
+```{r}
+
+postem_ele = emmeans(tmbmod_ele2, ~Treatment|Status+Distance)
+cld(postem_ele) 
+
+postem_ele = emmeans(tmbmod_ele2, ~Treatment|Status, component="zi")
+cld(postem_ele) 
+
+pairs(pairs(postem_ele), by=NULL, adjust="fdr")
+
+```
+
+
+### WPC vs CONT
+
+```{r}
+# Does the relationship WPC and CONT change based on experiment status?
+# Subset
+OPagg_CONT = OPCagg[-which(OPCagg$Treatment=="WPM"),]
+# Transform
+OPagg_CONT$mean_3 = OPagg_CONT$mean^(1/3)
+
+# Fit model
+WPCmod_ele = glmmTMB(mean_3 ~ Status * Treatment + log(Distance+1)*Treatment + (1|Site) + (1|Period), ziformula = ~., data=OPagg_CONT)
+
+# Diagnostics
+testResiduals(simulateResiduals(WPCmod_ele))
+
+# Examine results
+summary(WPCmod_ele)
+tab_model(WPCmod_ele)
+```
+
+### Final plot
+```{r}
+
+allmeans <- Rmisc::summarySE(OPCagg[which(OPCagg$mean>0),], groupvars=c("Treatment","Distance","Status"), measurevar="mean")
+OPCagg$bin = ifelse(OPCagg$mean_3>0,1,0)
+
+CPCOLS <- c( "orangered", "#2A5675","dodgerblue")
+CPCOLS2 = c("orangered", "black", "gray40")
+CPCOLS3 = c("gray70", "black", "gray40")
+
+OPCdung_bin = ggplot(OPCagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=2)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=CPCOLS)+
+  scale_fill_manual(values=CPCOLS)+
+  facet_wrap(~Status)+
+  theme(plot.margin=unit(c(-0.15, 1, 1, 1),"cm"), strip.background = element_blank(), strip.text.x = element_blank())+
+  guides(col=F,fill=F, shape=F)+
+  labs(x="Distance (m)", y=bquote("Dung Probability"/6*m^2))
+
+allOPCdung = ggplot(allmeans, aes(x=Distance, y=mean))+
+  geom_smooth(method="lm",se=F,aes(col=Treatment, fill=Treatment), formula=y~log(x+1))+
+  geom_point(aes(col=Treatment, shape=Treatment),size=1.5, stroke=1.5)+
+  facet_wrap(~Status)+
+  scale_color_manual(values=CPCOLS3)+
+  scale_fill_manual(values=CPCOLS3)+
+  scale_shape_manual(values=c(2,1,1))+
+  theme_bw(base_size=20)+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,1,0,0.9),"cm"), axis.title.x = element_blank())+
+  labs(x="Outward Distance (m)", y=bquote("Dung Density "*cm^3/m^2))+
+  guides(fill=F, col=F, shape=F)
+
+eledungopcplot = gridExtra::grid.arrange(allOPCdung, OPCdung_bin, ncol=1)
+
+
+
+
+```
+
+
+## Cows
+
+### Setup
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Wide format
+OPCw = OPC[,c(1:8,17)] %>% spread(key=Side, value=Cow)
+
+# As before, if two measurements were taken at the same distance, average
+OPCw$mean = ifelse(is.na(OPCw$`1`),OPCw$`0`,(OPCw$`0`+OPCw$`1`)/2)
+
+# Aggregate over transect
+OPCagg = OPCw %>%
+  group_by(Period, Status, Treatment, Site, Distance) %>%
+  summarize_at(vars(mean), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+# Transform
+OPCagg$mean_3 = OPCagg$mean^(1/3)
+
+# Reorder levels of the factor
+OPCagg$Status = factor(OPCagg$Status, levels=c("Pre", "During", "Post"))
+
+```
+
+### Fitting
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit full model
+OPagg_EXPT = OPCagg[-which(OPCagg$Treatment=="CONT"),]
+
+#tmbmod_cow = glmmTMB(mean_3 ~ Status*log(Distance+1)*Treatment+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+#summary(tmbmod_cow)
+
+# Drop full interaction
+tmbmod_cow2 = glmmTMB(mean_3 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_cow2))
+
+# View output
+summary(tmbmod_cow2)
+tab_model(tmbmod_cow2)
+
+
+```
+
+### Post Hoc
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+postem_cow = emmeans(tmbmod_cow2, ~ Status|Treatment)
+cld(postem_cow) # No difference in conditional component
+
+postem_cow = emmeans(tmbmod_cow2, ~ Status|Treatment, component="zi")
+cld(postem_cow)
+
+
+```
+
+
+### WPC vs CONT
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Compare filled water pan with dry site throughout experiment
+# Subset
+OPagg_CONT = OPCagg[-which(OPCagg$Treatment=="WPM"),]
+
+# Transform
+OPagg_CONT$mean_3 = OPagg_CONT$mean^(1/3)
+
+# Fit model
+WPCmod_cow = glmmTMB(mean_3 ~ Status * Treatment + log(Distance+1)*Treatment + (1|Site) + (1|Period), ziformula = ~., data=OPagg_CONT)
+
+# Diagnostics
+testResiduals(simulateResiduals(WPCmod_cow))
+
+# View results
+Anova(WPCmod_cow,type=3)
+summary(WPCmod_cow)
+tab_model(WPCmod_cow)
+
+```
+
+### Final plot
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+allmeans = Rmisc::summarySE(OPCagg[which(OPCagg$mean>0),], groupvars = c("Treatment","Distance","Status"), measurevar="mean")
+OPCagg$bin = ifelse(OPCagg$mean_3>0,1,0)
+
+CPCOLS = c( "orangered", "#2A5675","dodgerblue")
+
+OPCdung_bin = ggplot(OPCagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=2)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=CPCOLS)+
+  scale_fill_manual(values=CPCOLS)+
+  facet_wrap(~Status)+
+  theme(plot.margin=unit(c(-0.15, 1, 1, 1),"cm"), strip.background = element_blank(), strip.text.x = element_blank())+
+  guides(col=F,fill=F, shape=F)+
+  labs(x="Distance (m)", y=bquote("Dung Probability"/6*m^2))
+
+allOPCdung = ggplot(allmeans, aes(x=Distance, y=mean))+
+  geom_smooth(method="lm",se=F, aes(col=Treatment, fill=Treatment), formula=y~log(x+1))+
+  geom_point(aes(col=Treatment, shape=Treatment), size=1.5, stroke=1.5)+
+  facet_wrap(~Status)+
+  scale_color_manual(values=CPCOLS2)+
+  scale_fill_manual(values=CPCOLS2)+
+  scale_shape_manual(values=c(2,1,1))+
+  theme_bw(base_size=20)+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,1,0,1.1),"cm"), axis.title.x = element_blank())+
+  labs(x="Outward Distance (m)", y=bquote("Dung Density "*cm^3/m^2))+
+  guides(fill=F, col=F, shape=F)
+
+cowdungopcplot = gridExtra::grid.arrange(allOPCdung, OPCdung_bin, ncol=1)
+
+```
+
+
+## Zebra
+
+### Setup
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Wide format
+OPCw = OPC[,c(1:8,18)] %>% spread(key=Side, value=Zebra)
+
+# If two measurements were taken at the same distance, we average them
+OPCw$mean = ifelse(is.na(OPCw$`1`),OPCw$`0`,(OPCw$`0`+OPCw$`1`)/2)
+
+# Aggregate over transect
+OPCagg = OPCw %>%
+  group_by(Period, Status, Treatment, Site, Distance) %>%
+  summarize_at(vars(mean), funs(mean(., na.rm=T))) %>% 
+  ugroup()
+
+# Transform
+OPCagg$mean_3 = OPCagg$mean^(1/3)
+
+# Reorder levels of the factor
+OPCagg$Status = factor(OPCagg$Status, levels=c("Pre", "During", "Post"))
+
+```
+
+### Fitting
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit full model
+OPagg_EXPT = OPCagg[-which(OPCagg$Treatment=="CONT"),]
+
+#tmbmod_zebra = glmmTMB(mean_3 ~ Status*log(Distance+1)*Treatment+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+#summary(tmbmod_zebra1)
+#Anova(tmbmod_zebra, type=3)
+
+# Drop full interaction
+tmbmod_zebra2 = glmmTMB(mean_3 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_zebra2))
+
+# View results
+summary(tmbmod_zebra2)
+tab_model(tmbmod_zebra2) 
+
+```
+
+### Post Hoc
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+postem_zeb = emmeans(tmbmod_zeb, ~Status|Treatment)
+cld(postem_zeb) 
+
+postem_zeb = emmeans(tmbmod_zeb, ~Status|Treatment, component="zi")
+cld(postem_zeb)
+
+
+```
+
+
+### WPC vs CONT
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Repeat as we have done for other animals
+OPagg_CONT = OPCagg[-which(OPCagg$Treatment=="WPM"),]
+OPagg_CONT$mean_3 = OPagg_CONT$mean^(1/3)
+
+# Fit model
+WPCmod_zeb = glmmTMB(mean_3 ~ Status * Treatment + log(Distance+1)*Treatment+ (1|Site) + (1|Period), ziformula = ~., data=OPagg_CONT)
+
+# Diagnostics
+testResiduals(simulateResiduals(WPCmod_zeb))
+
+# View results
+Anova(WPCmod_zeb,type=3)
+summary(WPCmod_zeb)
+tab_model(WPCmod_zeb)
+```
+
+### Final plot
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+allmeans = Rmisc::summarySE(OPCagg[which(OPCagg$mean>0),], groupvars=c("Treatment","Distance","Status"), measurevar="mean")
+OPCagg$bin = ifelse(OPCagg$mean_3>0,1,0)
+
+CPCOLS = c( "orangered", "#2A5675","dodgerblue")
+
+OPCdung_bin = ggplot(OPCagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=2)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=CPCOLS2)+
+  scale_fill_manual(values=CPCOLS2)+
+  facet_wrap(~Status)+
+  theme(plot.margin=unit(c(-0.15, 1, 1, 1),"cm"), strip.background = element_blank(), strip.text.x = element_blank())+
+  guides(col=F,fill=F, shape=F)+
+  labs(x="Distance (m)", y=bquote("Dung Probability"/6*m^2))
+
+allOPCdung = ggplot(allmeans, aes(x=Distance, y=mean))+
+  geom_smooth(method="lm",se=F, aes(col=Treatment, fill=Treatment), formula=y~log(x+1))+
+  geom_point(aes(col=Treatment, shape=Treatment), size=1.5, stroke=1.5)+
+  facet_wrap(~Status)+
+  scale_color_manual(values=CPCOLS3)+
+  scale_fill_manual(values=CPCOLS3)+
+  scale_shape_manual(values=c(2,1,1))+
+  theme_bw(base_size=20)+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,1,0,1.1),"cm"), axis.title.x = element_blank())+
+  labs(x="Outward Distance (m)", y=bquote("Dung Density "*cm^3/m^2))+
+  guides(fill=F, col=F, shape=F)
+
+zebdungopcplot = gridExtra::grid.arrange(allOPCdung, OPCdung_bin, ncol=1)
+
+
+```
+
+## Buffalo
+
+### Setup
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Wide format
+OPCw = OPC[,c(1:8,16)] %>% spread(key=Side, value=Buffalo)
+
+# If two measurements were taken at the same distance, we average them
+OPCw$mean = ifelse(is.na(OPCw$`1`),OPCw$`0`,(OPCw$`0`+OPCw$`1`)/2)
+
+# Aggregate over transect
+OPCagg = OPCw %>%
+  group_by(Period, Status, Treatment, Site, Distance) %>%
+  summarize_at(vars(mean), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+# Transform
+OPCagg$mean_3 = OPCagg$mean^(1/3)
+
+# Reorder levels of the factor
+OPCagg$Status = factor(OPCagg$Status, levels=c("Pre", "During", "Post"))
+
+```
+
+### Fitting
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit full model
+OPagg_EXPT = OPCagg[-which(OPCagg$Treatment=="CONT"),]
+
+# tmbmod_buf = glmmTMB(mean_3 ~ Status*log(Distance+1)*Treatment+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+# summary(tmbmod_buf)
+# Anova(tmbmod_buf, type=3)
+
+# drop full interaction
+tmbmod_buf2 = glmmTMB(mean_3 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+
+# diagnostics
+testResiduals(simulateResiduals(tmbmod_buf2))
+
+# View results
+summary(tmbmod_buf2)
+tab_model(tmbmod_buf2)
+
+```
+
+### Post Hoc
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+postem_buf = emmeans(tmbmod_buf, ~Status|Treatment)
+cld(postem_buf)
+
+postem_buf = emmeans(tmbmod_buf, ~Status|Treatment, component="zi")
+cld(postem_buf)
+
+
+```
+
+
+### WPC vs CONT
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+OPagg_CONT = OPCagg[-which(OPCagg$Treatment=="WPM"),]
+OPagg_CONT$mean_3 = OPagg_CONT$mean^(1/3)
+
+WPCmod_buf = glmmTMB(mean_3 ~ Status * Treatment + log(Distance+1)*Treatment + (1|Site) + (1|Period), ziformula = ~., data=OPagg_CONT)
+Anova(WPCmod_buf,type=3)
+summary(WPCmod_buf)
+tab_model(WPCmod_buf)
+
+```
+
+### Final plot
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+allmeans = Rmisc::summarySE(OPCagg[which(OPCagg$mean>0),], groupvars=c("Treatment","Distance","Status"), measurevar="mean")
+OPCagg$bin = ifelse(OPCagg$mean_3>0,1,0)
+
+CPCOLS = c( "orangered", "#2A5675","dodgerblue")
+
+OPCdung_bin = ggplot(OPCagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=2)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=CPCOLS)+
+  scale_fill_manual(values=CPCOLS)+
+  facet_wrap(~Status)+
+  theme(plot.margin=unit(c(-0.15, 1, 1, 1),"cm"), strip.background = element_blank(), strip.text.x = element_blank())+
+  guides(col=F,fill=F, shape=F)+
+  labs(x="Distance (m)", y=bquote("Dung Probability"/6*m^2))
+
+allOPCdung = ggplot(allmeans, aes(x=Distance, y=mean))+
+  geom_smooth(method="lm",se=F, aes(col=Treatment, fill=Treatment), formula=y~log(x+1))+
+  geom_point(aes(col=Treatment, shape=Treatment), size=1.5, stroke=1.5)+
+  facet_wrap(~Status)+
+  scale_color_manual(values=CPCOLS3)+
+  scale_fill_manual(values=CPCOLS3)+
+  scale_shape_manual(values=c(2,1,1))+
+  theme_bw(base_size=20)+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,1,0,1.1),"cm"), axis.title.x = element_blank())+
+  labs(x="Outward Distance (m)", y=bquote("Dung Density "*cm^3/m^2))+
+  guides(fill=F, col=F, shape=F)
+
+bufdungopcplot = gridExtra::grid.arrange(allOPCdung, OPCdung_bin, ncol=1)
+
+#ggsave("FINAL_PLOTS/OPCbufdungplot2.png", bufdungopcplot, width=10, height=10, units="in")
+
+
+```
+
+
+## Impala
+
+### Setup
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# wide format
+OPCw = OPC[,c(1:8,19)] %>% spread(key=Side, value=Impala)
+
+# If two measurements were taken at the same distance, we average them
+OPCw$mean = ifelse(is.na(OPCw$`1`),OPCw$`0`,(OPCw$`0`+OPCw$`1`)/2)
+
+# Aggregate over transect
+OPCagg <- OPCw%>%
+  group_by(Period, Status, Treatment, Site, Distance)%>%
+  summarize_at(vars(mean), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+# Transform
+OPCagg$mean_3 = OPCagg$mean^(1/3)
+
+# Reorder levels of the factor
+OPCagg$Status = factor(OPCagg$Status, levels=c("Pre", "During", "Post"))
+
+```
+
+### Fitting
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit full model
+OPagg_EXPT = OPCagg[-which(OPCagg$Treatment=="CONT"),]
+
+# log transformation provided better fit
+OPagg_EXPT$mean_4 = ifelse(OPagg_EXPT$mean == 0, 0, log(OPagg_EXPT$mean))
+
+#tmbmod_imp = glmmTMB(mean_3 ~ Status*log(Distance+1)*Treatment+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+#summary(tmbmod_imp)
+#car::Anova(tmbmod_imp, type=3)
+
+# Drop full interaction
+#tmbmod_imp2 = glmmTMB(mean_3 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+tmbmod_imp3 = glmmTMB(mean_4 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+
+#testResiduals(simulateResiduals(tmbmod_imp2))
+testResiduals(simulateResiduals(tmbmod_imp3)) # log is better
+
+tab_model(tmbmod_imp3)
+
+
+```
+
+### Post Hoc
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+postem_imp = emmeans(tmbmod_imp3, ~Status|Treatment)
+cld(postem_imp)
+
+postem_imp = emmeans(tmbmod_imp3, ~Status|Treatment, component="zi")
+cld(postem_imp)
+
+
+```
+
+
+### WPC vs CONT
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Subset and transform
+OPagg_CONT = OPCagg[-which(OPCagg$Treatment=="WPM"),]
+OPagg_CONT$mean_4 = ifelse(OPagg_CONT$mean == 0, 0, log(OPagg_CONT$mean))
+
+# Fit
+WPCmod_imp = glmmTMB(mean_4 ~ Status * Treatment + log(Distance+1) *Treatment + (1|Site) + (1|Period), ziformula = ~., data=OPagg_CONT)
+
+# Diagnostics
+testResiduals(simulateResiduals(WPCmod_imp))
+
+# View results
+Anova(WPCmod_imp,type=3)
+summary(WPCmod_imp)
+tab_model(WPCmod_imp)
+```
+
+### Final plot
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+allmeans = Rmisc::summarySE(OPCagg[which(OPCagg$mean>0),], groupvars=c("Treatment","Distance","Status"), measurevar="mean")
+OPCagg$bin = ifelse(OPCagg$mean_3>0,1,0)
+
+
+OPCdung_bin = ggplot(OPCagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=2)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=CPCOLS3)+
+  scale_fill_manual(values=CPCOLS3)+
+  facet_wrap(~Status)+
+  theme(plot.margin=unit(c(-0.15, 1, 1, 1),"cm"), strip.background = element_blank(), strip.text.x = element_blank())+
+  guides(col=F,fill=F, shape=F)+
+  labs(x="Distance (m)", y=bquote("Dung Probability"/6*m^2))
+
+allOPCdung = ggplot(allmeans, aes(x=Distance, y=mean))+
+  geom_smooth(method="lm",se=F, aes(col=Treatment, fill=Treatment), formula=y~log(x+1))+
+  geom_point(aes(col=Treatment, shape=Treatment), size=1.5, stroke=1.5)+
+  facet_wrap(~Status)+
+  scale_color_manual(values=CPCOLS2)+
+  scale_fill_manual(values=CPCOLS2)+
+  scale_shape_manual(values=c(2,1,1))+
+  theme_bw(base_size=20)+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,1,0,1.1),"cm"), axis.title.x = element_blank())+
+  labs(x="Outward Distance (m)", y=bquote("Dung Density "*cm^3/m^2))+
+  guides(fill=F, col=F, shape=F)
+
+impdungopcplot = gridExtra::grid.arrange(allOPCdung, OPCdung_bin, ncol=1)
+
+
+```
+
+## Giraffe
+
+### Setup
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Wide format
+OPCw = OPC[,c(1:8,20)] %>% spread(key=Side, value=Giraffe)
+
+# Using the same logic as before, if two measurements were taken at the same distance, we average them
+OPCw$mean = ifelse(is.na(OPCw$`1`),OPCw$`0`,(OPCw$`0`+OPCw$`1`)/2)
+
+# Aggregate over transect
+OPCag = OPCw %>%
+  group_by(Period, Status, Treatment, Site, Distance) %>%
+  summarize_at(vars(mean), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+# Transform
+OPCagg$mean_3 = OPCagg$mean^(1/3)
+
+# Reorder levels of the factor
+OPCagg$Status = factor(OPCagg$Status, levels=c("Pre", "During", "Post"))
+
+```
+
+### Fitting
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit full model
+OPagg_EXPT = OPCagg[-which(OPCagg$Treatment=="CONT"),]
+OPagg_EXPT$mean_4 = ifelse(OPagg_EXPT$mean == 0, 0, log(OPagg_EXPT$mean))
+
+
+#tmbmod_gir = glmmTMB(mean_3 ~ Status*log(Distance+1)*Treatment+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+#Anova(tmbmod_gir, type=3)
+
+# Drop full interaction
+tmbmod_gir1 = glmmTMB(mean_3 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_gir1))
+
+# View results
+tab_model(tmbmod_gir1) 
+
+
+```
+
+### Post Hoc
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+postem_gir = emmeans(tmbmod_gir1, ~Status|Treatment)
+cld(postem_gir) 
+
+postem_gir = emmeans(tmbmod_gir1, ~Status|Treatment, component="zi")
+cld(postem_gir) 
+
+```
+
+
+### WPC vs CONT
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Subset and transform
+OPagg_CONT = OPCagg[-which(OPCagg$Treatment=="WPM"),]
+OPagg_CONT$mean_3 = OPagg_CONT$mean^(1/3)
+
+# Fit
+WPCmod_gir = glmmTMB(mean_3 ~ Status * Treatment + log(Distance+1)*Treatment + (1|Site) + (1|Period), ziformula = ~., data=OPagg_CONT)
+
+# Diagnostics
+testResiduals(simulateResiduals(WPCmod_gir))
+
+# View results
+Anova(WPCmod_gir,type=3)
+summary(WPCmod_gir)
+tab_model(WPCmod_gir)
+
+```
+
+### Final plot
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+allmeans=Rmisc::summarySE(OPCagg[which(OPCagg$mean>0),], groupvars=c("Treatment","Distance","Status"), measurevar="mean")
+OPCagg$bin = ifelse(OPCagg$mean_3>0,1,0)
+
+CPCOLS=c( "orangered", "#2A5675","dodgerblue")
+
+OPCdung_bin = ggplot(OPCagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=2)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=CPCOLS2)+
+  scale_fill_manual(values=CPCOLS2)+
+  facet_wrap(~Status)+
+  theme(plot.margin=unit(c(-0.15, 1, 1, 1),"cm"), strip.background = element_blank(), strip.text.x = element_blank())+
+  guides(col=F,fill=F, shape=F)+
+  labs(x="Distance (m)", y=bquote("Dung Probability"/6*m^2))
+
+allOPCdung = ggplot(allmeans, aes(x=Distance, y=mean))+
+  geom_smooth(method="lm",se=F, aes(col=Treatment, fill=Treatment), formula=y~log(x+1))+
+  geom_point(aes(col=Treatment, shape=Treatment), size=1.5, stroke=1.5)+
+  facet_wrap(~Status)+
+  scale_color_manual(values=CPCOLS3)+
+  scale_fill_manual(values=CPCOLS3)+
+  scale_shape_manual(values=c(2,1,1))+
+  theme_bw(base_size=20)+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,1,0,1.1),"cm"), axis.title.x = element_blank())+
+  labs(x="Outward Distance (m)", y=bquote("Dung Density "*cm^3/m^2))+
+  guides(fill=F, col=F, shape=F)
+
+girdungopcplot = gridExtra::grid.arrange(allOPCdung, OPCdung_bin, ncol=1)
+
+
+```
+
+
+# Fecal Egg Count Analyses
+
+## Setup
+```{r}
+# Reimport the data to ensure calculations are correct
+OPC = read.csv("OPCdata.csv")
+
+# Multiply by the median egg count and prevalence
+
+# Note that using mean did not change major conclusions
+OPC$Emult = 540*0.58*OPC$Elephant #795 mean, 540 median
+OPC$Bmult = 20*0.95 * OPC$Buffalo #61
+OPC$Cmult = 255*0.95 * OPC$Cow #292 mean, 255 median
+OPC$Zmult = 820*0.79 * OPC$Zebra #1108 mean, 820 median
+OPC$Imult = 125*1.66 * OPC$Impala #163 mean, 125 median
+OPC$Gmult = 1*1.66 * OPC$Giraffe #56 mean, 1 median
+
+OPCegglong = OPC %>% gather(Emult, Gmult, Zmult, Bmult, Imult, Cmult, key=Species, value=Psites)
+
+OPCeggNEW = OPCegglong %>%
+  group_by(Species) %>%
+  summarize_at(vars(Psites), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+ggplot(OPCeggNEW, aes(x="", y=Psites, fill=Species))+
+geom_bar(width = 1, stat = "identity")+
+ylab("Parasite Eggs")+
+coord_polar("y", start=0)+
+theme_bw(base_size=14)+
+scale_fill_manual(values=c("dodgerblue","dodgerblue4","green3","goldenrod","dodgerblue3","maroon3"))
+
+# now add up
+OPC$allegg = OPC$Bmult+OPC$Cmult+OPC$Emult+OPC$Zmult+OPC$Imult+OPC$Gmult
+```
+
+## Aggregate across tsects
+
+```{r}
+# Calculate the mean based on side
+OPCw = OPC[,c(1:8,27)] %>% spread(key=Side, value=allegg)
+
+OPCw$mean = ifelse(is.na(OPCw$`1`),OPCw$`0`,(OPCw$`0`+OPCw$`1`)/2)
+
+# Aggregate over transect: this is the average per m^2 (n=6)
+OPCagg = OPCw %>%
+  group_by(Period, Status, Treatment, Site, Distance) %>%
+  summarize_at(vars(mean), funs(mean)) %>% 
+  ungroup()
+
+OPCagg$mean_3 = OPCagg$mean^(1/3)
+
+# Order the time groupings
+OPCagg$Status = factor(OPCagg$Status, levels=c("Pre", "During", "Post"))
+
+```
+
+### Fitting
+Here we use zero-inflated models
+
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit full model
+OPagg_EXPT = OPCagg[-which(OPCagg$Treatment=="CONT"),]
+OPagg_EXPT$mean_3 = OPagg_EXPT$mean^(1/3)
+
+#tmbmod_egg = glmmTMB(mean_3 ~ Status*log(Distance+1)*Treatment+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+#car::Anova(tmbmod_egg, type=3)
+#summary(tmbmod_egg)
+
+# Drop full interaction
+tmbmod_egg2 = glmmTMB(mean_3 ~ Status*Treatment+log(Distance+1)+(1|Site)+(1|Period), data=OPagg_EXPT, REML=F, ziformula=~.)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_egg2))
+
+# View results
+tab_model(tmbmod_egg2, show.stat=T, show.se=T)
+summary(tmbmod_egg2)
+
+
+# Additional plotting
+ggplot(OPCagg, aes(x=Distance,y=mean^(1/3)))+
+  geom_point(aes(col=Treatment),alpha=0.3)+
+  #geom_point(aes(col=Treatment,x=Distance, y=preds^(1/3)),shape=2)+
+  geom_smooth(aes(col=Treatment,fill=Treatment),method="lm",formula=y~sqrt(x))+
+  facet_wrap(~Status)+
+  theme_bw()
+
+# Log Ratio Plot
+# Wide format
+wid = OPCagg %>% pivot_wider(names_from=Treatment, values_from=mean, -mean_3)
+widag = wid %>% group_by(Status, Distance) %>% summarize_at(vars(CONT:WPM), funs(mean(.,na.rm=T)))
+widag$lr2=log(widag$WPC+1)-log(widag$WPM+1)
+
+widagag = summarySE(widag, groupvars=c("Status","Distance"), measurevar = "lr2")
+CPCOLS=c("#2A5675", "#42B889", "#1F6CAB")
+
+alleggopcplot = ggplot(widagag, aes(x=Distance, y=lr2))+
+  #geom_jitter(data=wid, aes(x=Distance, y=lr, col=Status), alpha=0.3, size=2, height=0, width=0.05)+
+  geom_point(aes(col=Status), size=4, shape=2, stroke=2)+
+  geom_smooth(aes(col=Status, fill=Status), method="lm",formula=y~log(x+1), se=T,  size=2)+
+  scale_color_manual(values=CPCOLS)+
+  scale_fill_manual(values=CPCOLS)+
+  facet_wrap(~Status)+
+  guides(col=F,  fill=F)+
+  geom_hline(yintercept=0)+
+  theme_bw(base_size=20)+
+  labs(x="Outward Distance (m)", y="Parasite Density Log-Ratio (Filled vs Drained)")
+alleggopcplot
+
+#ggsave("figure3.pdf", alleggopcplot, width=10, height=7, units="in", device="pdf")
+
+
+```
+
+
+### Post hoc comparisons
+
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+postem_egg = emmeans(tmbmod_egg2, ~Treatment|Status)
+(cld(postem_egg))
+postem_egg = emmeans(tmbmod_egg2, ~Treatment|Status, component="zi")
+(cld(postem_egg))
+
+```
+
+
+### Test for differences between WPC and CONT
+
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Does the relationship WPC and CONT change based on experiment status?
+OPagg_CONT = OPCagg[-which(OPCagg$Treatment=="WPM"),]
+OPagg_CONT$mean_3 = OPagg_CONT$mean^(1/3)
+
+# Fite
+WPCmod_egg = glmmTMB(mean_3 ~ Status * Treatment + log(Distance+1)*Treatment + (1|Site) + (1|Period), ziformula = ~., data=OPagg_CONT)
+
+# Diagnostics
+testResiduals(simulateResiduals(WPCmod_egg)) # slight deviations
+
+# View results
+Anova(WPCmod_egg,type=3)
+tab_model(WPCmod_egg)
+
+```
+
+### Gather results
+
+
+````{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+allmeans=Rmisc::summarySE(OPCagg[which(OPCagg$mean>0),], groupvars=c("Treatment","Distance","Status"), measurevar="mean")
+OPCagg$bin = ifelse(OPCagg$mean_3>0,1,0)
+
+CPCOLS = c( "orangered", "#2A5675","dodgerblue")
+
+OPCdung_bin = ggplot(OPCagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=2)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=20)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=CPCOLS2)+
+  scale_fill_manual(values=CPCOLS2)+
+  facet_wrap(~Status)+
+  theme(plot.margin=unit(c(-0.15, 1, 1, 1),"cm"), strip.background = element_blank(), strip.text.x = element_blank())+
+  guides(col=F,fill=F, shape=F)+
+  labs(x="Distance (m)", y=bquote("Dung Probability"/6*m^2))
+
+allOPCdung = ggplot(allmeans, aes(x=Distance, y=mean))+
+  geom_smooth(method="lm",se=T, aes(col=Treatment, fill=Treatment), alpha=0.2, formula=y~log(x+1))+
+  geom_point(data=allmeans, aes(x=Distance, y=mean, col=Treatment, shape=Treatment),size=1.5, stroke=1.5)+
+  facet_wrap(~Status)+
+  scale_color_manual(values=CPCOLS)+
+  scale_fill_manual(values=CPCOLS)+
+  scale_shape_manual(values=c(2,1,1))+
+  theme_bw(base_size=20)+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1, scale=1e-3), limits=c(-1000,200000))+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,1,0,1.1),"cm"), axis.title.x = element_blank())+
+  labs(x="Outward Distance (m)", y=bquote("Dung Density "*cm^3/m^2))
+  #guides(fill=F, col=F, shape=F)
+
+eggdungopcplot = gridExtra::grid.arrange(allOPCdung, OPCdung_bin, ncol=1)
+
+```
+
+
+
+# Mpala Analyses
+
+
+## Import data
+
+```{r}
+MPALA=read.csv("MPALAdata.csv")
+head(MPALA)
+
+MPALAlong=gather(MPALA, Elephant, Cow, Buffalo, Zebra, Impala, Giraffe, key=Species, value=Total)
+newMPALA = MPALAlong %>% group_by(Species) %>% summarize_at(vars(Total), funs(mean(., na.rm=T)))
+
+
+MPpie = ggplot(newMPALA, aes(x="", y=Total, fill=reorder(Species,Total)))+
+geom_bar(width = 1, stat = "identity")+
+  labs(x="Dung density (cm3 per m2)")+
+  coord_polar("y", start=0)+
+  scale_fill_viridis_d(direction=1, begin=0, end=0.9)+
+  scale_color_viridis_d(direction=1, begin=0, end=0.9)+
+  theme_bw(base_size=20)
+MPpie
+
+
+```
+
+## All Animals
+
+### Setup
+```{r}
+
+# Aggregate over transect
+MPagg=MPALA %>%
+  group_by(Period,Treatment, Site, MAP, Distance, Rain30) %>%
+  summarize_at(vars(all), funs(mean)) %>% 
+  ungroup()
+
+head(MPagg)
+
+# Order the treatment levels
+MPagg$Treatment = factor(MPagg$Treatment, levels=c("CONT", "WH"))
+
+# Factor for random effects
+MPagg$Site = as.factor(MPagg$Site)
+MPagg$Period = as.factor(MPagg$Period)
+
+```
+
+### Fitting
+```{r}
+
+MPagg$Dist100 = MPagg$Distance/100
+MPagg$MAP100 = MPagg$MAP/100 -4.6  # set minimum to zero so that the intercept corresponds to driest location
+MPagg$Rain100 = MPagg$Rain30/100
+MPagg$all_3 = MPagg$all^(1/3)
+
+```
+
+
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit models
+# Full
+#tmbmod_mp = glmmTMB(all_3 ~ MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~.)
+#summary(tmbmod_mp)
+
+tmbmod_mp1 = glmmTMB(all_3 ~ MAP100*Treatment + log(Distance+1)*Treatment + Rain100 + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~  MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period))
+
+summary(tmbmod_mp1)
+
+#tmbmod_mp2 = glmmTMB(all_3 ~ MAP100 + log(Distance+1)*Treatment + Rain100 + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~  MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period))
+#summary(tmbmod_mp2)
+
+#bbmle::AICctab(tmbmod_mp, tmbmod_mp1, tmbmod_mp2) # mp1 is best
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_mp1))
+
+# View results
+tab_model(tmbmod_mp1)
+
+```
+
+
+
+### Plotting
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$bin = ifelse(MPagg$all_3 == 0,0,1)
+
+MAPsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("MAP","Treatment"), measurevar="all")
+
+MAPdung_bin = ggplot(MPagg, aes(x=MAP, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, 1),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  labs(x="Annual Rainfall (mm/yr)", y=bquote("Dung Probability"/6*m^2))
+
+MAPdung = ggplot(MAPsum, aes(x=MAP, y=all))+
+  geom_smooth(method="lm",se = T, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1), limits=c(-14,294))+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,-0.5,0,1),"cm"))+
+  labs(x=NULL, y=bquote("Dung Density  "*cm^3/{m^2}))
+
+
+MAPC = gridExtra::grid.arrange(MAPdung, MAPdung_bin, ncol=1, heights=c(1,1))
+
+MPagg$RainCUT = round(MPagg$Rain30, digits = -1)
+Rainsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("RainCUT","Treatment"), measurevar="all")
+
+Raindung_bin = ggplot(MPagg, aes(x=Rain30, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, 1, 1, -0.5),"cm"))+
+  guides(color=F, fill=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="30 day Rainfall (mm)", y=NULL)
+
+Raindung = ggplot(Rainsum, aes(x=RainCUT, y=all))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes( col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01), limits=c(-14,294))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,1,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+
+RainC = gridExtra::grid.arrange(Raindung, Raindung_bin, ncol=1, heights=c(1,1))
+
+
+Distsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("Distance","Treatment"), measurevar="all")
+
+Distdung_bin = ggplot(MPagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, -0.5),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="Outward Distance (m)", y=NULL)
+
+Distdung = ggplot(Distsum, aes(x=Distance, y=all))+
+  geom_smooth(method="lm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01), limits=c(-14,294))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,-0.5,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+DistC = gridExtra::grid.arrange(Distdung, Distdung_bin, ncol=1, heights=c(1,1))
+
+alldungMPplot = gridExtra:: grid.arrange(MAPC, DistC, RainC,  ncol=3, widths=c(1.5,1,1))
+
+
+```
+
+### Simpler log ratio plots:
+
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+# Wide format
+widmp =MPagg %>% pivot_wider(names_from=Treatment, values_from = all,-c(all_3)) #exclude bin column if present
+
+# Log ratio
+widmp$lr = log(widmp$WH+1)-log(widmp$CONT+1)
+
+# Distance
+widagmp = widmp %>% 
+  group_by(Distance) %>%
+  summarize_at(vars(CONT:WH,lr), funs(mean(.,na.rm=T))) %>% 
+  ungroup()
+
+widagmp$lr2=log(widagmp$WH+1)-log(widagmp$CONT+1)
+
+widagagmp = summarySE(widagmp, groupvars=c("Distance"), measurevar = "lr")
+
+distmp = ggplot(widagagmp, aes(x=Distance, y=lr))+
+  geom_point(col="darkgreen", size=4, shape=2, stroke=2)+
+  geom_smooth(col="darkgreen", fill="darkgreen", method="lm",formula=y~log(x+1), se=T,  size=2, alpha=0.2)+
+  guides(col=F,  fill=F)+
+  geom_hline(yintercept=0)+
+  theme_bw(base_size=20)+
+  labs(x="Outward Distance (m)", y="Dung Density Log-Ratio (Water vs Dry Site)")
+distmp
+
+# MAP
+widagmp = widmp %>% group_by(MAP) %>% summarize_at(vars(CONT:WH,lr), funs(mean(.,na.rm=T)))
+widagmp$lr2=log(widagmp$WH+1)-log(widagmp$CONT+1)
+
+widagagmp = summarySE(widagmp, groupvars=c("MAP"), measurevar = "lr")
+
+mapmp = ggplot(widagagmp, aes(x=MAP, y=lr))+
+  geom_point(col="darkred", size=4, shape=2, stroke=2)+
+  geom_smooth(fill="darkred", col="darkred", method="lm",formula=y~log(x), se=T,  size=2, alpha=0.2)+
+  guides(col=F,  fill=F)+
+  geom_hline(yintercept=0)+
+  theme_bw(base_size=20)+
+  labs(x="Mean Annual Precipitation (mm/yr)", y="Dung Density Log-Ratio (Water vs Dry Site)")
+mapmp
+
+
+# Rainfall
+widagmp = widmp %>% group_by(Rain30) %>% summarize_at(vars(CONT:WH,lr), funs(mean(.,na.rm=T)))
+widagmp$lr2=log(widagmp$WH+1)-log(widagmp$CONT+1)
+
+widagagmp = summarySE(widagmp, groupvars=c("Rain30"), measurevar = "lr")
+
+rainmp = ggplot(widagagmp, aes(x=Rain30, y=lr))+
+  geom_point(col="darkblue", size=4, shape=2, stroke=2)+
+  geom_smooth(fill="darkblue", col="darkblue", method="lm",formula=y~(x), se=T,  size=2, alpha=0.2)+
+  guides(col=F,  fill=F)+
+  geom_hline(yintercept=0)+
+  theme_bw(base_size=20)+
+  labs(x="Prior Rainfall (mm/30 days)", y="Dung Density Log-Ratio (Water vs Dry Site)")
+
+
+combo = gridExtra::grid.arrange(mapmp,rainmp, distmp,ncol=3)
+
+
+
+```
+
+
+## Elephants
+The same analysis is now conducted on all animals individually.
+
+### Setup
+```{r}
+
+# Aggregate over transect
+MPagg = MPALA %>%
+  group_by(Period,Treatment, Site, MAP, Distance, Rain30) %>%
+  summarize_at(vars(Elephant), funs(mean)) %>% 
+  ungroup()
+
+head(MPagg)
+
+# Order the treatment levels
+MPagg$Treatment = factor(MPagg$Treatment, levels=c("CONT", "WH"))
+
+# Factor for random effects
+MPagg$Site = as.factor(MPagg$Site)
+MPagg$Period = as.factor(MPagg$Period)
+
+```
+
+### Fitting
+```{r}
+
+MPagg$Dist100 = MPagg$Distance/100
+MPagg$MAP100 = MPagg$MAP/100 -4.6  # set minimum to zero so that the intercept corresponds to driest location
+MPagg$Rain100 = MPagg$Rain30/100
+MPagg$all_3 = MPagg$Elephant^(1/3)
+
+```
+
+
+```{r}
+# Fit model (this was the best)
+tmbmod_elemp = glmmTMB(all_3 ~ MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~.)
+summary(tmbmod_elemp)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_elemp))
+
+# View results
+tab_model(tmbmod_elemp) # slight deviation for KS
+
+
+```
+
+### Plotting
+```{r}
+
+MPagg$bin = ifelse(MPagg$all_3 == 0,0,1)
+
+MAPsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("MAP","Treatment"), measurevar="Elephant")
+
+MAPdung_bin = ggplot(MPagg, aes(x=MAP, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, 1),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  labs(x="Annual Rainfall (mm/yr)", y=bquote("Dung Probability"/6*m^2))
+
+MAPdung = ggplot(MAPsum, aes(x=MAP, y=Elephant))+
+  geom_smooth(method="lm",se = F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  #scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1), limits=c(18,558))+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,-0.5,0,1),"cm"))+
+  labs(x=NULL, y=bquote("Dung Density  "*cm^3/{m^2}))
+
+unlist(ggplot_build(MAPdung)$layout$panel_params[[1]][c("y.range")])
+
+MAPC = gridExtra::grid.arrange(MAPdung, MAPdung_bin, ncol=1, heights=c(1,1))
+
+MPagg$RainCUT = round(MPagg$Rain30,digits=-1)
+Rainsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("RainCUT","Treatment"), measurevar="Elephant")
+
+Raindung_bin = ggplot(MPagg, aes(x=Rain30, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm",se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  #scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_color_manual(values=c("gray60","black"))+
+  theme(plot.margin=unit(c(-0.5, 1, 1, -0.5),"cm"))+
+  guides(color=F, fill=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="30 day Rainfall (mm)", y=NULL)
+
+Raindung = ggplot(Rainsum, aes(x=RainCUT, y=Elephant))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01),limits=c(18,558))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,1,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Raindung)$layout$panel_params[[1]][c("y.range")])
+
+RainC = gridExtra::grid.arrange(Raindung, Raindung_bin, ncol=1, heights=c(1,1))
+
+
+Distsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("Distance","Treatment"), measurevar="Elephant")
+
+Distdung_bin = ggplot(MPagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, -0.5),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="Outward Distance (m)", y=NULL)
+
+Distdung = ggplot(Distsum, aes(x=Distance, y=Elephant))+
+  geom_smooth(method="lm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1), limits=c(18,558))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,-0.5,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Distdung)$layout$panel_params[[1]][c("y.range")])
+
+DistC = gridExtra::grid.arrange(Distdung, Distdung_bin, ncol=1, heights=c(1,1))
+
+
+eledungMPplot = gridExtra:: grid.arrange(MAPC, DistC, RainC,  ncol=3, widths=c(1.5,1,1))
+
+
+```
+
+
+## Cows
+
+### Setup
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+# Aggregate over transect
+MPagg = MPALA%>%
+  group_by(Period,Treatment, Site, MAP, Distance, Rain30) %>%
+  summarize_at(vars(Cow), funs(mean)) %>% 
+  ungroup()
+
+# Order the treatment levels
+MPagg$Treatment = factor(MPagg$Treatment, levels=c("CONT", "WH"))
+
+# Factor for random effects
+MPagg$Site = as.factor(MPagg$Site)
+MPagg$Period = as.factor(MPagg$Period)
+
+```
+
+### Fitting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$Dist100 = MPagg$Distance/100
+MPagg$MAP100=MPagg$MAP/100 -4.6  # set minimum to zero so that the intercept corresponds to driest location
+MPagg$Rain100 = MPagg$Rain30/100
+MPagg$all_3 = MPagg$Cow^(1/3)
+
+```
+
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit model
+tmbmod_cowmp = glmmTMB(all_3 ~ MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~.)
+
+summary(tmbmod_cowmp)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_cowmp))
+
+# View results
+tab_model(tmbmod_cowmp)
+
+```
+
+### Plotting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$bin = ifelse(MPagg$all_3 == 0,0,1)
+
+MAPsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("MAP","Treatment"), measurevar="Cow")
+
+MAPdung_bin = ggplot(MPagg, aes(x=MAP, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  #scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_color_manual(values=c("gray60","black"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, 1),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  labs(x="Annual Rainfall (mm/yr)", y=bquote("Dung Probability"/6*m^2))
+
+MAPdung = ggplot(MAPsum, aes(x=MAP, y=Cow))+
+  geom_smooth(method="lm",se = T, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(data=MAPsum, aes(x=MAP, y=Cow, col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1), limits=c(1,92))+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,-0.5,0,1),"cm"))+
+  labs(x=NULL, y=bquote("Dung Density  "*cm^3/{m^2}))
+
+unlist(ggplot_build(MAPdung)$layout$panel_params[[1]][c("y.range")])
+
+MAPC = gridExtra::grid.arrange(MAPdung, MAPdung_bin, ncol=1, heights=c(1,1))
+
+MPagg$RainCUT = round(MPagg$Rain30, digits=-1)
+Rainsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("RainCUT","Treatment"), measurevar="Cow")
+
+Raindung_bin = ggplot(MPagg, aes(x=Rain30, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm",se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  #scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_color_manual(values=c("gray60","black"))+
+  theme(plot.margin=unit(c(-0.5, 1, 1, -0.5),"cm"))+
+  guides(color=F, fill=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="30 day Rainfall (mm)", y=NULL)
+
+Raindung = ggplot(Rainsum, aes(x=RainCUT, y=Cow))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01), limits=c(1,92))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,1,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Raindung)$layout$panel_params[[1]][c("y.range")])
+
+RainC = gridExtra::grid.arrange(Raindung, Raindung_bin, ncol=1, heights=c(1,1))
+
+
+Distsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("Distance","Treatment"), measurevar="Cow")
+
+Distdung_bin = ggplot(MPagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, -0.5),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="Outward Distance (m)", y=NULL)
+
+Distdung = ggplot(Distsum, aes(x=Distance, y=Cow))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  #scale_fill_manual(values=c("orangered","dodgerblue"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1), limits=c(1,92))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,-0.5,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Distdung)$layout$panel_params[[1]][c("y.range")])
+
+DistC = gridExtra::grid.arrange(Distdung, Distdung_bin, ncol=1, heights=c(1,1))
+
+
+cowdungMPplot = gridExtra:: grid.arrange(MAPC, DistC, RainC,  ncol=3, widths=c(1.5,1,1))
+
+
+```
+
+
+## Zebra
+
+### Setup
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+# aggregate over transect
+MPagg = MPALA %>%
+  group_by(Period,Treatment, Site, MAP, Distance, Rain30) %>%
+  summarize_at(vars(Zebra), funs(mean)) %>% 
+  ungroup()
+
+# Order the treatment levels
+MPagg$Treatment = factor(MPagg$Treatment, levels=c("CONT", "WH"))
+
+# Factor for random effects
+MPagg$Site = as.factor(MPagg$Site)
+MPagg$Period = as.factor(MPagg$Period)
+
+```
+
+### Fitting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$Dist100 = MPagg$Distance/100
+MPagg$MAP100 = MPagg$MAP/100 -4.6  # set minimum to zero so that the intercept corresponds to driest location
+MPagg$Rain100 = MPagg$Rain30/100
+MPagg$all_3 = MPagg$Zebra^(1/3)
+
+```
+
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+# Fit model
+
+tmbmod_zebmp = glmmTMB(all_3 ~ MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~.)
+
+summary(tmbmod_zebmp)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_zebmp))
+
+# View results
+tab_model(tmbmod_zebmp)
+
+```
+
+### Plotting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+MPagg$bin = ifelse(MPagg$all_3 == 0,0,1)
+
+MAPsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("MAP","Treatment"), measurevar="Zebra")
+
+MAPdung_bin = ggplot(MPagg, aes(x=MAP, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  #geom_point(data=MAPsum, aes(x=MAP, y=all_3, col=Treatment), shape=2, size=4, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("gray60","black"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, 1),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  labs(x="Annual Rainfall (mm/yr)", y=bquote("Dung Probability"/6*m^2))
+
+MAPdung = ggplot(MAPsum, aes(x=MAP, y=Zebra))+
+  geom_smooth(method="lm",se = F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(data=MAPsum, aes(x=MAP, y=Zebra, col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.1), limits=c(-4,86))+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,-0.5,0,1),"cm"))+
+  labs(x=NULL, y=bquote("Dung Density  "*cm^3/{m^2}))
+
+unlist(ggplot_build(MAPdung)$layout$panel_params[[1]][c("y.range")])
+
+MAPC = gridExtra::grid.arrange(MAPdung, MAPdung_bin, ncol=1, heights=c(1,1))
+
+MPagg$RainCUT = round(MPagg$Rain30, digits=-1)
+Rainsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("RainCUT","Treatment"), measurevar="Zebra")
+
+Raindung_bin = ggplot(MPagg, aes(x=Rain30, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, 1, 1, -0.5),"cm"))+
+  guides(color=F, fill=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="30 day Rainfall (mm)", y=NULL)
+
+Raindung = ggplot(Rainsum, aes(x=RainCUT, y=Zebra))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1), limits=c(-4,86))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,1,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Raindung)$layout$panel_params[[1]][c("y.range")])
+
+RainC = gridExtra::grid.arrange(Raindung, Raindung_bin, ncol=1, heights=c(1,1))
+
+
+
+Distsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("Distance","Treatment"), measurevar="Zebra")
+
+Distdung_bin = ggplot(MPagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, -0.5),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="Outward Distance (m)", y=NULL)
+
+Distdung = ggplot(Distsum, aes(x=Distance, y=Zebra))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(x=Distance, y=Zebra, col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1), limits=c(-4,86))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,-0.5,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Distdung)$layout$panel_params[[1]][c("y.range")])
+
+DistC = gridExtra::grid.arrange(Distdung, Distdung_bin, ncol=1, heights=c(1,1))
+
+
+
+zebdungMPplot = gridExtra:: grid.arrange(MAPC, DistC, RainC,  ncol=3, widths=c(1.5,1,1))
+#zebdungMPplot = gridExtra:: grid.arrange(MAPdung, Distdung, Raindung,  ncol=3, widths=c(1,1,1.5))
+
+
+```
+
+
+## Impala
+
+### Setup
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# aggregate over transect
+MPagg = MPALA %>%
+  group_by(Period,Treatment, Site, MAP, Distance, Rain30) %>%
+  summarize_at(vars(Impala), funs(mean)) %>% 
+  ungroup()
+
+
+# Order the treatment levels
+MPagg$Treatment = factor(MPagg$Treatment, levels=c("CONT", "WH"))
+
+# Factor for random effects
+MPagg$Site = as.factor(MPagg$Site)
+MPagg$Period = as.factor(MPagg$Period)
+
+```
+
+### Fitting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$Dist100 = MPagg$Distance/100
+MPagg$MAP100 = MPagg$MAP/100 -4.6  # set minimum to zero so that the intercept corresponds to driest location
+MPagg$Rain100 = MPagg$Rain30/100
+MPagg$all_3 = MPagg$Impala^(1/3)
+
+```
+
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit model
+tmbmod_impmp = glmmTMB(all_3 ~ MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~.)
+
+summary(tmbmod_impmp)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_impmp))
+
+# View results
+tab_model(tmbmod_impmp)
+
+```
+
+### Plotting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$bin = ifelse(MPagg$all_3 == 0,0,1)
+
+MAPsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("MAP","Treatment"), measurevar="Impala")
+
+MAPdung_bin = ggplot(MPagg, aes(x=MAP, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("gray60","black"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, 1),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  labs(x="Annual Rainfall (mm/yr)", y=bquote("Dung Probability"/6*m^2))
+
+MAPdung = ggplot(MAPsum, aes(x=MAP, y=Impala))+
+  geom_smooth(method="lm",se = F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes( col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01), limits=c(-1,5))+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,-0.5,0,1),"cm"))+
+  labs(x=NULL, y=bquote("Dung Density  "*cm^3/{m^2}))
+
+unlist(ggplot_build(MAPdung)$layout$panel_params[[1]][c("y.range")])
+
+MAPC = gridExtra::grid.arrange(MAPdung, MAPdung_bin, ncol=1, heights=c(1,1))
+
+MPagg$RainCUT = round(MPagg$Rain30, digits=-1)
+Rainsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("RainCUT","Treatment"), measurevar="Impala")
+
+Raindung_bin = ggplot(MPagg, aes(x=Rain30, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, 1, 1, -0.5),"cm"))+
+  guides(color=F, fill=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="30 day Rainfall (mm)", y=NULL)
+
+Raindung = ggplot(Rainsum, aes(x=RainCUT, y=Impala))+
+  geom_smooth(method="lm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.1), limits = c(-1,5))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,1,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Raindung)$layout$panel_params[[1]][c("y.range")])
+
+RainC = gridExtra::grid.arrange(Raindung, Raindung_bin, ncol=1, heights=c(1,1))
+
+Distsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("Distance","Treatment"), measurevar="Impala")
+
+Distdung_bin = ggplot(MPagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("gray60","black"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, -0.5),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="Outward Distance (m)", y=NULL)
+
+Distdung = ggplot(Distsum, aes(x=Distance, y=Impala))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(data=Distsum, aes(x=Distance, y=Impala, col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.1), limits=c(-1,5))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,-0.5,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Distdung)$layout$panel_params[[1]][c("y.range")])
+
+DistC = gridExtra::grid.arrange(Distdung, Distdung_bin, ncol=1, heights=c(1,1))
+
+
+
+impdungMPplot = gridExtra:: grid.arrange(MAPC, DistC, RainC,  ncol=3, widths=c(1.5,1,1))
+
+
+```
+
+
+## Giraffe
+
+### Setup
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+# aggregate over transect
+MPagg = MPALA %>%
+  group_by(Period,Treatment, Site, MAP, Distance, Rain30) %>%
+  summarize_at(vars(Giraffe), funs(mean)) %>% 
+  ungroup()
+
+
+# Order the treatment levels
+MPagg$Treatment = factor(MPagg$Treatment, levels=c("CONT", "WH"))
+
+# Factor for random effects
+MPagg$Site = as.factor(MPagg$Site)
+MPagg$Period = as.factor(MPagg$Period)
+
+```
+
+### Fitting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$Dist100 = MPagg$Distance/100
+MPagg$MAP100 = MPagg$MAP/100 -4.6  # set minimum to zero so that the intercept corresponds to driest location
+MPagg$Rain100 = MPagg$Rain30/100
+MPagg$all_3 = MPagg$Giraffe^(1/3)
+
+```
+
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit model
+tmbmod_girmp = glmmTMB(all_3 ~ MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~.)
+
+summary(tmbmod_girmp)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_girmp))
+
+# View results
+tab_model(tmbmod_girmp)
+
+```
+
+### Plotting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$bin = ifelse(MPagg$all_3 == 0,0,1)
+
+MAPsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("MAP","Treatment"), measurevar="Giraffe")
+
+MAPdung_bin = ggplot(MPagg, aes(x=MAP, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, 1),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  labs(x="Annual Rainfall (mm/yr)", y=bquote("Dung Probability"/6*m^2))
+
+MAPdung = ggplot(MAPsum, aes(x=MAP, y=Giraffe))+
+  geom_smooth(method="lm",se = T, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01), limits=c(-1,17))+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,-0.5,0,1),"cm"))+
+  labs(x=NULL, y=bquote("Dung Density  "*cm^3/{m^2}))
+
+unlist(ggplot_build(MAPdung)$layout$panel_params[[1]][c("y.range")])
+
+MAPC = gridExtra::grid.arrange(MAPdung, MAPdung_bin, ncol=1, heights=c(1,1))
+
+MPagg$RainCUT = round(MPagg$Rain30, digits=-1)
+Rainsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("RainCUT","Treatment"), measurevar="Giraffe")
+
+Raindung_bin = ggplot(MPagg, aes(x=Rain30, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, 1, 1, -0.5),"cm"))+
+  guides(color=F, fill=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="30 day Rainfall (mm)", y=NULL)
+
+Raindung = ggplot(Rainsum, aes(x=RainCUT, y=Giraffe))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01), limits=c(-1,17))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,1,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Raindung)$layout$panel_params[[1]][c("y.range")])
+
+RainC = gridExtra::grid.arrange(Raindung, Raindung_bin, ncol=1, heights=c(1,1))
+
+
+
+Distsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("Distance","Treatment"), measurevar="Giraffe")
+
+Distdung_bin = ggplot(MPagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("gray60","black"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, -0.5),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="Outward Distance (m)", y=NULL)
+
+Distdung = ggplot(Distsum, aes(x=Distance, y=Giraffe))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01), limits=c(-1,17))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,-0.5,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Distdung)$layout$panel_params[[1]][c("y.range")])
+
+DistC = gridExtra::grid.arrange(Distdung, Distdung_bin, ncol=1, heights=c(1,1))
+
+
+
+girdungMPplot = gridExtra:: grid.arrange(MAPC, DistC, RainC,  ncol=3, widths=c(1.5,1,1))
+
+
+```
+
+
+## Buffalo
+
+### Setup
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+# aggregate over transect
+MPagg = MPALA %>%
+  group_by(Period,Treatment, Site, MAP, Distance, Rain30) %>%
+  summarize_at(vars(Buffalo), funs(mean)) %>% 
+  ungroup()
+
+
+# Order the treatment levels
+MPagg$Treatment = factor(MPagg$Treatment, levels=c("CONT", "WH"))
+
+# Factor for random effects
+MPagg$Site = as.factor(MPagg$Site)
+MPagg$Period = as.factor(MPagg$Period)
+
+```
+
+### Fitting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$Dist100 = MPagg$Distance/100
+MPagg$MAP100 = MPagg$MAP/100 -4.6  # set minimum to zero so that the intercept corresponds to driest location
+MPagg$Rain100 = MPagg$Rain30/100
+MPagg$all_3 = MPagg$Buffalo^(1/3)
+
+```
+
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit model
+tmbmod_bufmp = glmmTMB(all_3 ~ MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~.)
+
+
+summary(tmbmod_bufmp)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_bufmp))
+
+# View results
+tab_model(tmbmod_bufmp)
+
+```
+
+### Plotting
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$bin = ifelse(MPagg$all_3 == 0,0,1)
+
+MAPsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("MAP","Treatment"), measurevar="Buffalo")
+
+MAPdung_bin = ggplot(MPagg, aes(x=MAP, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, 1),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  labs(x="Annual Rainfall (mm/yr)", y=bquote("Dung Probability"/6*m^2))
+
+MAPdung = ggplot(MAPsum, aes(x=MAP, y=Buffalo))+
+  geom_smooth(method="lm",se = F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1), limits=c(25,223))+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,-0.5,0,1),"cm"))+
+  labs(x=NULL, y=bquote("Dung Density  "*cm^3/{m^2}))
+
+unlist(ggplot_build(MAPdung)$layout$panel_params[[1]][c("y.range")])
+
+MAPC = gridExtra::grid.arrange(MAPdung, MAPdung_bin, ncol=1, heights=c(1,1))
+
+MPagg$RainCUT = round(MPagg$Rain30, digits=-1)
+Rainsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("RainCUT","Treatment"), measurevar="Buffalo")
+
+Raindung_bin = ggplot(MPagg, aes(x=Rain30, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("gray60","black"))+
+  #scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, 1, 1, -0.5),"cm"))+
+  guides(color=F, fill=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="30 day Rainfall (mm)", y=NULL)
+
+Raindung = ggplot(Rainsum, aes(x=RainCUT, y=Buffalo))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01), limits=c(25,223))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,1,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Raindung)$layout$panel_params[[1]][c("y.range")])
+
+RainC = gridExtra::grid.arrange(Raindung, Raindung_bin, ncol=1, heights=c(1,1))
+
+
+
+Distsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("Distance","Treatment"), measurevar="Buffalo")
+
+Distdung_bin = ggplot(MPagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("gray60","black"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, -0.5),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="Outward Distance (m)", y=NULL)
+
+Distdung = ggplot(Distsum, aes(x=Distance, y=Buffalo))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 0.01), limits=c(25,223))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,-0.5,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+unlist(ggplot_build(Distdung)$layout$panel_params[[1]][c("y.range")])
+
+DistC = gridExtra::grid.arrange(Distdung, Distdung_bin, ncol=1, heights=c(1,1))
+
+
+
+bufdungMPplot = gridExtra:: grid.arrange(MAPC, DistC, RainC,  ncol=3, widths=c(1.5,1,1))
+
+```
+
+
+## Mpala Egg Counts
+
+### Setup
+```{r}
+# Read in values again to ensure correct calculations
+MPALA = read.csv("MPALAdata.csv")
+
+# Median egg count and prevalence multiplied
+
+MPALA$Emult = 540 *0.58* MPALA$Elephant #795 mean
+MPALA$Bmult = 20 *0.95* MPALA$Buffalo #61
+MPALA$Cmult = 255 *0.95* MPALA$Cow #292
+MPALA$Zmult = 820 *0.79* MPALA$Zebra #1108
+MPALA$Imult = 125 *1.66* MPALA$Impala #163
+MPALA$Gmult = 1 *1.66* MPALA$Giraffe #56
+
+MPegglong = MPALA %>% gather(Emult,Gmult, Zmult, Bmult, Imult, Cmult, key=Species, value=Psites)
+
+MPeggNEW <- MPegglong %>%
+  group_by(Species, Treatment,Site) %>%
+  summarize_at(vars(Psites), funs(mean)) %>% 
+  ungroup()
+
+MPeggNEW$Species <- as.factor(MPeggNEW$Species)
+levels(MPeggNEW$Species) <- c("Buffalo", "Cow", "Elephant", "Giraffe", "Impala", "Zebra")
+  
+
+errdat <- Rmisc::summarySE(MPeggNEW, groupvars=c("Species","Treatment"), measurevar=c("Psites"))
+
+mp_egg_fig2 = ggplot(MPeggNEW, aes(x=reorder(Species,-Psites), y=(Psites+1), fill=Treatment))+
+geom_jitter(position=position_dodge(width=0.5), aes(col=Treatment), alpha=0.3)+
+  geom_point(data=errdat, aes(x=reorder(Species,-Psites),y=(Psites+1), color=Treatment), position=position_dodge(width=0.5), size=1.5)+
+  geom_errorbar(data=errdat, aes(x=reorder(Species,-Psites), y=(Psites+1), color=Treatment, ymin=Psites-se+1, ymax=Psites+se+1), position=position_dodge(width=0.5), width=0.5,size=1.2)+
+ylab("Parasite Eggs")+
+theme_bw(base_size=14)+
+  scale_y_log10(breaks=c(1,10,100,1000,10000,100000))+
+  labs(y=bquote("Parasite Eggs per m" ^2 +1), x="Host Species")+
+  scale_color_manual(values=c("CONT"="orangered","WH"="steelblue3"), labels=c("Dry Site","Water (pan)"))
+mp_egg_fig2
+
+#ggsave("fig2_panelCb.png", mp_egg_fig2, width=7, height=5)
+
+
+#### replicate with OPC data
+head(OPCegglong)
+OPCeggNEW <- OPCegglong %>%
+  group_by(Species, Treatment, Site) %>%
+  summarize_at(vars(Psites), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+OPCeggNEW$Species = as.factor(OPCeggNEW$Species)
+levels(OPCeggNEW$Species) <- c("Buffalo", "Cow", "Elephant", "Giraffe", "Impala", "Zebra")
+
+errdatOPC = Rmisc::summarySE(OPCeggNEW[-which(OPCeggNEW$Treatment == "WPM"),], groupvars=c("Species","Treatment"), measurevar=c("Psites"))
+
+
+opc_egg_fig2 = ggplot(OPCeggNEW[-which(OPCeggNEW$Treatment=="WPM"),], aes(x=reorder(Species,-Psites), y=(Psites+1), fill=Treatment))+
+geom_jitter(position=position_dodge(width=0.5), aes(col=Treatment), alpha=0.5)+
+  geom_point(data=errdatOPC, aes(x=reorder(Species,-Psites),y=(Psites+1), color=Treatment), position=position_dodge(width=0.5), size=1.5)+
+  geom_errorbar(data=errdatOPC, aes(x=reorder(Species,-Psites), y=(Psites), color=Treatment, ymin=Psites-se+1, ymax=Psites+se+1), position=position_dodge(width=0.5), width=0.5,size=1.2)+
+ylab("Parasite Eggs")+
+theme_bw(base_size=14)+
+  scale_y_log10(breaks=c(1,10,100,1000,10000,100000))+
+  labs(y=bquote("Parasite Eggs per m" ^2 +1), x="Host Species")+
+  scale_color_manual(values=c("CONT"="orangered","WPC"="#2A5675"), labels=c("Dry Site","Water (pan)"))
+opc_egg_fig2
+
+writexl::write_xlsx(list(Observational_Points=MPeggNEW,
+                Observational_Bars = errdat,
+                Experimental_Points = OPCeggNEW[-which(OPCeggNEW$Treatment=="WPM"),],
+                Experimental_Bars = errdatOPC), "figure_2C.xlsx")
+#ggsave("fig2_panelC.png", opc_egg_fig2, width=7, height=5)
+
+# Find total at Mpala
+MPALA$allegg = MPALA$Bmult+MPALA$Cmult+MPALA$Emult+MPALA$Zmult+MPALA$Imult+MPALA$Gmult
+
+MPeggNEW = MPegglong %>%
+  group_by(Species, Treatment,Distance) %>%
+  summarize_at(vars(Psites), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+MPeggNEW$Species = as.factor(MPeggNEW$Species)
+levels(MPeggNEW$Species) = c("Buffalo", "Cow", "Elephant", "Giraffe", "Impala", "Zebra")
+  
+levels(MPeggNEW$Treatment)=c("Control","Water")
+stackpsite = ggplot(MPeggNEW, aes(x=Distance, y=Psites, fill=reorder(Species,Psites), color=reorder(Species,Psites)))+
+geom_area()+ 
+#coord_polar("y", clip="off")+
+  facet_wrap(~Treatment)+
+  scale_fill_viridis_d(direction=1, begin=0, end=0.9)+
+  scale_color_viridis_d(direction=1, begin=0, end=0.9)+
+  theme_bw(base_size=20)+
+  scale_y_continuous(breaks=c(0,25000,50000,75000,100000,125000))+
+  labs(fill="Species",col="Species")+
+  labs(x="Outward Distance (m)", y="Parasite Density (Eggs/m2)")
+
+stackpsite
+
+```
+
+
+### Fitting
+
+```{r}
+
+MPnew = MPALA %>% 
+  group_by(Period, MAP, Rain30,Treatment, Site, Distance) %>%
+  summarize_at(vars(allegg), funs(mean(.,na.rm=T))) %>% 
+  ungroup()
+
+ggplot(MPnew, aes(x=Distance, y=log(allegg+1)))+
+  geom_point(aes(color=Treatment), alpha=0.2)+
+  stat_smooth(aes(color=Treatment, fill=Treatment), method="lm")+
+  facet_wrap(~cut(MAP,3))+
+  ylab("Log Parasite Eggs per m2")+
+  xlab("Outward Distance")
+
+```
+
+
+```{r}
+MPagg = MPALA %>%
+  group_by(Distance,Period,Treatment, Site, MAP, Rain30) %>%
+  summarize_at(vars(allegg), funs(mean)) %>% 
+  ungroup()
+
+# Factors
+MPagg$Treatment = factor(MPagg$Treatment, levels=c("CONT", "WH"))
+MPagg$Site = as.factor(MPagg$Site)
+MPagg$Period = as.factor(MPagg$Period)
+MPagg$all_3 = (MPagg$allegg)^(1/3)
+
+# Differencing
+MPagg$Dist100 = MPagg$Distance/100
+MPagg$MAP100 = MPagg$MAP/100 - 4.5# subtract lowest value so that the intercept corresponds to driest spot
+MPagg$Rain100 = MPagg$Rain30/100
+
+```
+
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Fit model
+tmbmod_eggmp = glmmTMB(all_3 ~ MAP100*Treatment + log(Distance+1)*Treatment + Rain100*Treatment + (1|Site) + (1|Period), data=MPagg, REML=F, ziformula=~.)
+
+summary(tmbmod_eggmp)
+
+# Diagnostics
+testResiduals(simulateResiduals(tmbmod_eggmp))
+
+# View results
+tab_model(tmbmod_eggmp, transform=NULL, show.stat=T, show.se=T, show.r2=T)
+
+```
+
+### Plotting
+```{r, include=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+MPagg$bin = ifelse(MPagg$all_3 == 0,0,1)
+
+MAPsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("MAP","Treatment"), measurevar="allegg")
+MPagg$RainCUT = round(MPagg$Rain30, digits=-1)
+Rainsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("RainCUT","Treatment"), measurevar="allegg")
+Distsum=Rmisc::summarySE(MPagg[which(MPagg$all_3>0),], groupvars=c("Distance","Treatment"), measurevar="allegg")
+
+
+MAPdung_bin = ggplot(MPagg, aes(x=MAP, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, 1),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  labs(x="Annual Rainfall (mm/yr)", y=bquote("Parasite Probability"/6*m^2))
+
+MAPdung = ggplot(MAPsum, aes(x=MAP, y=allegg))+
+  geom_smooth(method="lm",se = T, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = .1, scale=1e-3), limits=c(-32868, 130000))+
+  theme(axis.text.x=element_blank(), axis.ticks.x = element_blank(), plot.margin=unit(c(1,-0.5,0,0.8),"cm"))+
+  labs(x=NULL, y=bquote("Parasite Density "*1000*" "*Eggs/{m^2}))
+
+unlist(ggplot_build(MAPdung)$layout$panel_params[[1]][c("y.range")])
+
+MAPC = gridExtra::grid.arrange(MAPdung, MAPdung_bin, ncol=1, heights=c(1,1))
+
+Raindung_bin = ggplot(MPagg, aes(x=Rain30, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, 1, 1, -0.5),"cm"))+
+  guides(color=F, fill=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="30 day Rainfall (mm)", y=NULL)
+
+Raindung = ggplot(Rainsum, aes(x=RainCUT, y=allegg))+
+  geom_smooth(method="lm", se=F, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("gray60","black"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1),limits=c(-32868, 130000))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,1,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+RainC = gridExtra::grid.arrange(Raindung, Raindung_bin, ncol=1, heights=c(1,1))
+
+
+Distdung_bin = ggplot(MPagg, aes(x=Distance, y=bin))+
+  geom_jitter(alpha=0.5, width=3, height=0, aes(col=Treatment), shape="|", size=3)+
+  geom_smooth(method="glm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2, method.args=list(family="binomial"))+
+  theme_bw(base_size=16)+
+  geom_hline(yintercept=0)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  theme(plot.margin=unit(c(-0.5, -0.5, 1, -0.5),"cm"))+
+  guides(color=F, fill=F, shape=F)+
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank())+
+  labs(x="Outward Distance (m)", y=NULL)
+
+Distdung = ggplot(Distsum, aes(x=Distance, y=allegg))+
+  geom_smooth(method="lm", se=T, aes(color=Treatment, fill=Treatment), alpha=0.2)+
+  geom_point(aes(col=Treatment, shape=Treatment), size=2, stroke=2, alpha=0.6)+
+  theme_bw(base_size=16)+
+  guides(color=F, fill=F, shape=F)+
+  scale_color_manual(values=c("orangered","dodgerblue"))+
+  scale_fill_manual(values=c("orangered","dodgerblue"))+
+  scale_shape_manual(values=c(2,1))+
+  scale_y_continuous(labels=scales::number_format(accuracy = 1),limits=c(-32868, 130000))+
+  theme(axis.text=element_blank(), axis.ticks= element_blank(), plot.margin=unit(c(1,-0.5,0,-0.5),"cm"))+
+  labs(x=NULL, y=NULL)
+
+DistC = gridExtra::grid.arrange(Distdung, Distdung_bin, ncol=1, heights=c(1,1))
+
+
+
+eggdungMPplot = gridExtra:: grid.arrange(MAPC, DistC, RainC,  ncol=3, widths=c(1.5,1,1))
+
+
+```
+
+### Log ratio plots
+
+```{r}
+# Wide format
+widmp = MPagg %>%
+  pivot_wider(names_from = Treatment,
+              values_from = allegg, -c(all_3,bin),
+              values_fill=0)
+widmp$lr = log(widmp$WH+1)-log(widmp$CONT+1)
+
+# Distance
+widagmp = widmp %>%
+  group_by(Distance) %>%
+  summarize_at(vars(CONT:WH,lr), funs(mean)) %>% 
+  ungroup()
+
+widagagmp = summarySE(widagmp, groupvars=c("Distance"), measurevar = "lr")
+
+distmp = ggplot(widagagmp, aes(x=Distance, y=lr))+
+  geom_point(data=widagagmp, aes(x=Distance, y=lr), col="darkgreen", size=4, shape=2, stroke=2)+
+  geom_smooth(col="darkgreen", fill="darkgreen", method="lm",formula=y~log(x+1), se=T,  size=2, alpha=0.2)+
+  guides(col=F,  fill=F)+
+  geom_hline(yintercept=0)+
+  theme_bw(base_size=20)+
+  labs(x="Outward Distance (m)", y="Parasite Density Log-Ratio (Water vs Dry Site)")
+distmp
+
+# MAP
+widagmp = widmp %>%
+  group_by(MAP) %>%
+  summarize_at(vars(CONT:WH,lr), funs(mean)) %>% 
+  ungroup()
+
+widagagmp = summarySE(widagmp, groupvars=c("MAP"), measurevar = "lr")
+
+mapmp = ggplot(widagagmp, aes(x=MAP, y=lr))+
+  geom_point(col="darkred", size=4, shape=2, stroke=2)+
+  geom_smooth(fill="darkred", col="darkred", method="lm",formula=y~log(x), se=T,  size=2, alpha=0.2)+
+  guides(col=F,  fill=F)+
+  geom_hline(yintercept=0)+
+  theme_bw(base_size=20)+
+  labs(x="Mean Annual Precipitation (mm/yr)", y="Parasite Density Log-Ratio (Water vs Dry Site)")
+mapmp
+
+
+# Rainfall
+widagmp = widmp %>%
+  group_by(Rain30) %>%
+  summarize_at(vars(CONT:WH,lr), funs(mean)) %>% 
+  ungroup()
+
+widagagmp = summarySE(widagmp, groupvars=c("Rain30"), measurevar = "lr")
+
+rainmp = ggplot(widagagmp, aes(x=Rain30, y=lr))+
+  geom_point(col="darkblue", size=4, shape=2, stroke=2)+
+  geom_smooth(fill="darkblue", col="darkblue", method="lm",formula=y~(x), se=T,  size=2, alpha=0.2)+
+  guides(col=F,  fill=F)+
+  geom_hline(yintercept=0)+
+  theme_bw(base_size=20)+
+  labs(x="Prior Rainfall (mm/30 days)", y="Parasite Density Log-Ratio (Water vs Dry Site)")
+
+combo = gridExtra::grid.arrange(mapmp,rainmp, distmp,ncol=3)
+
+#ggsave("figure4.pdf", combo, width=15, height=7, units="in", device="pdf")
+```
+
+
+# Eggs in the environment
+
+```{r}
+
+# Read in data
+enveggs = read.csv("ENV_EGGS.csv")
+head(enveggs)
+
+```
+
+Split Experiment and Observation
+
+```{r}
+
+MPenvegg = subset(enveggs, Number %in% c("1","2","3","4","5","6","7","8","9","10","11","12","13","14","15","16","17","-2","-1","0"))
+OPCenvegg = subset(enveggs, Number %in% c("Jericho","Oscar","Kambi","Tangi","Sidai"))
+
+dim(MPenvegg)
+dim(OPCenvegg)
+```
+
+## Experimental analyses
+
+There are three different simple analyses:
+
+1. Comparison of dry soil at 0m at each of the pans throughout the experiment. 
+    We expected there to be no difference before/after draining, but lower egg counts at WPM during the experiment.
+
+2. Comparison of dry soil at filled water pans and dry sites (1km away).
+    We expected higher egg counts in dry soils at water pans compared to dry sites.
+
+3. Pooled dry and wet soil egg count comparison at filled and drained water pans throughout the experiment.
+    We had the same hypothesis as in #1, but expected the effect to be larger, since there is no wet soil at drained water pans.
+
+```{r}
+# Sample Summary
+#OPCenvegg %>% group_by(Status,Sample)%>%summarize(n())
+
+# Simple plot
+ggplot(OPCenvegg, aes(x=Sample, y=Eggs))+
+  geom_boxplot(aes(col=Status))
+```
+
+#### 1. Compare 0m dry soils at water pans throughout the experiment
+
+```{r}
+
+head(OPCenvegg)
+
+# WPM/WPC Comparison: subset 0m Dry soils
+OPCenveggEXPT = OPCenvegg[-which(OPCenvegg$Sample %in% c("1000_Dry","0_Wet","50_Dry")),]
+OPCenveggEXPT$Status = factor(OPCenveggEXPT$Status, levels=c("Pre","During","Post"))
+
+# Fit model
+eggmod = glmmTMB(Eggs ~ Status*Type+(1|Number)+(1|Period), data=OPCenveggEXPT, REML=F, family="nbinom2")
+
+# View results
+summary(eggmod)
+Anova(eggmod,type=3)
+
+# Drop interaction
+eggmod2 = glmmTMB(Eggs ~ Status+Type+(1|Number)+(1|Period), data=OPCenveggEXPT, REML=F, family="nbinom2")
+summary(eggmod2)
+Anova(eggmod2,type=3)
+
+# Diagnostics
+testResiduals(simulateResiduals(eggmod2))
+
+```
+
+#### 2. Compare all dry soil eggs at water sources and dry sites
+
+```{r}
+
+head(OPCenvegg)
+
+# Subset data to include dry soils
+smalldf = OPCenvegg[which(OPCenvegg$Sample %in% c("0_Dry","50_Dry","1000_Dry")),]
+smalldf$Type=as.factor(smalldf$Type)
+
+# Combine 0m and 50m samples
+levels(smalldf$Type) = c("Dry Site", "Water", "Water")
+
+# Simple summary
+summarySE(smalldf, groupvars=c("Type"), measurevar="Eggs")
+
+# Fit model
+eggmod2 = glmmTMB(Eggs ~ Type + (1|Location)+(1|Period), data=smalldf, REML=F, family="nbinom2")
+summary(eggmod2)
+Anova(eggmod2, type=3)
+
+# Diagnostics
+testResiduals(simulateResiduals(eggmod2))
+
+```
+
+#### 3. Compare WPM and WPC but including wet soil eggs
+
+```{r}
+
+# Compare wet to dry soil
+OPCenveggEXPT2 = OPCenvegg[-which(OPCenvegg$Sample%in% c("1000_Dry","50_Dry")),]
+OPCenveggEXPT2$Status = factor(OPCenveggEXPT2$Status, levels=c("Pre","During","Post"))
+
+# Fit model
+eggmod = glmmTMB(Eggs ~ Status*Type+(1|Number)+(1|Period), data=OPCenveggEXPT2, REML=F, family="nbinom2")
+
+summary(eggmod)
+Anova(eggmod,type=3)
+
+emegg = emmeans(eggmod, ~Type|Status)
+cld(emegg)
+
+
+# Plotting
+OPCenveggEXPT2$legg = log(OPCenveggEXPT2$Eggs+1)
+eggem = Rmisc::summarySE(OPCenveggEXPT2, groupvars=c("Status","Type"), measurevar="legg")
+eggem$Status=factor(eggem$Status, levels=c("Pre","During", "Post"))
+OPCenveggEXPT2$Status=factor(OPCenveggEXPT2$Status, levels=c("Pre", "During", "Post"))
+
+ggplot(OPCenveggEXPT2, aes(x=Type, y=legg))+
+  geom_jitter(width=0.05, alpha=0.5, color="gray60")+
+  geom_violin(fill=NA, color="gray60")+
+  geom_point(data=eggem, aes(x=Type, y=legg), col="red", size=3)+
+  geom_errorbar(data=eggem, aes(x=Type, ymin=legg-se, ymax=legg+se), color="red", width=0.5, size=1.25)+
+  theme_bw(base_size=14)+
+  facet_wrap(~Status)+
+  labs(y="ln(Eggs per 20g Soil + 1)", x="Sampling Location")
+
+
+```
+
+
+## Observational Analyses
+
+We compared all sample types at each location using another negative binomial model.
+
+```{r}
+
+head(MPenvegg)
+# Reorder factor levels
+MPenvegg$Sample = factor(MPenvegg$Sample, levels=c("1000_Dry","50_Dry","0_Dry","0_Wet"))
+
+site_map = MPALA %>% 
+  group_by(Site) %>% 
+  summarize_at(vars(MAP), funs(mean)) %>% 
+  mutate_at(vars(Site), funs(as.character))
+
+MPenvegg = left_join(MPenvegg, site_map, by = c("Number"="Site"))
+
+mpeggmod = glmmTMB(Eggs ~ Sample * MAP +(1|Number)+(1|Period), data=MPenvegg, family=nbinom2)
+summary(mpeggmod)
+Anova(mpeggmod)
+# drop interaction
+
+mpeggmod = glmmTMB(Eggs ~ Sample + MAP + (1|Number)+(1|Period), data=MPenvegg, family=nbinom2)
+summary(mpeggmod)
+Anova(mpeggmod)
+# drop MAP
+
+mpeggmod = glmmTMB(Eggs ~ Sample + (1|Number)+(1|Period), data=MPenvegg, family=nbinom2)
+
+# Diagnostics
+testResiduals(simulateResiduals(mpeggmod))
+
+# View results
+summary(mpeggmod)
+Anova(mpeggmod, type=3)
+
+# Post hoc
+ems = emmeans(mpeggmod, ~Sample, type="response")
+cld(ems, adjust="tukey")
+
+
+# Plotting
+MPenvegg$legg = log(MPenvegg$Eggs+1)
+levels(MPenvegg$Sample)
+# Reorder for plotting
+MPenvegg$Sample = factor(MPenvegg$Sample, levels=c("0_Wet","0_Dry","50_Dry","1000_Dry"))
+# Rename
+levels(MPenvegg$Sample) = c("0m Wet","0m Dry","50m", "1km")
+eggem = Rmisc::summarySE(MPenvegg, groupvars="Sample", measurevar="legg")
+
+ggplot(MPenvegg, aes(x=Sample, y=legg))+
+  geom_jitter(width=0.05, alpha=0.5, color="gray60")+
+  geom_violin(fill=NA, color="gray60")+
+  geom_point(data=eggem, aes(x=Sample, y=legg), col="red", size=3)+
+  geom_errorbar(data=eggem, aes(x=Sample, ymin=legg-se, ymax=legg+se), color="red", width=0.5, size=1.25)+
+  theme_bw(base_size=14)+
+  labs(y="log(Eggs per 20g Soil + 1)", x="Sampling Location")+
+  annotate(geom="text", label=c("A","B","C","BC"), x=c(1,2,3,4), y=c(3,1.5,1,1), size=5)
+
+
+ggplot(MPenvegg, aes(x=MAP, y=legg))+
+  geom_jitter(width=0.5,height=0.2, alpha=0.5, color="gray60")+
+  geom_smooth(method="lm", se=F)+
+  theme_bw(base_size=14)+
+  labs(y="log(Eggs per 20g Soil + 1)", x="MAP")+
+  facet_wrap(~Sample)
+
+```
+

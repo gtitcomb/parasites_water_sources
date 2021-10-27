@@ -1,0 +1,1675 @@
+---
+title: "Behavior Differences and Exposures"
+author: "Georgia Titcomb"
+date: "April 5, 2021"
+output:
+  html_document:
+    code_folding: show
+    smooth_scroll: yes
+    toc: yes
+    toc_float: yes
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+#knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+
+library(tidyverse)
+library(sjPlot)
+library(glmmTMB)
+library(DHARMa)
+library(flextable)
+library(gdtools)
+library(emmeans)
+library(flextable)
+
+
+```
+
+Set Analysis Type Here:
+```{r}
+
+# For a (quicker) demonstration, run: FULL_ANALYSIS = FALSE and DEMO_ANALYSIS = TRUE
+# For full analysis, run: FULL_ANALYSIS = TRUE and DEMO_ANALYSIS = FALSE
+
+FULL_ANALYSIS = FALSE
+DEMO_ANALYSIS = TRUE
+
+```
+
+# 1. Herbivore Behavior Analyses
+
+## 1.1 Mpala Data
+
+### 1.1.1 Read in data
+```{r}
+
+mpdata = read.csv("MPALAcameras.csv")
+
+# Mean Daily Activity plot
+mpdata %>%
+  select(choice, Type, Number, Month, Day, Year, duration_count:duration_graze) %>% 
+  pivot_longer(cols=c(duration_count:duration_graze)) %>% 
+  group_by(choice, Type, Number, name) %>% 
+  summarize_at(vars(value), funs(mean)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x=reorder(choice, -value), y=value))+
+  geom_col(aes(fill=name))+
+  facet_wrap(~Type)+
+  scale_y_log10()+
+  scale_fill_manual(values=c("gray60", "dodgerblue", "green3"))+
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0))
+
+# set MAP intercept such that 0 corresponds to 450
+mpdata$MAP  = mpdata$MAP - 450
+```
+
+
+### 1.1.2 Create 'analyze' function
+Write function to analyze activity (duration_count) for each animal of interest.
+
+```{r}
+
+analyze = function(species, df){
+  eledat = df %>% 
+      filter(choice==species)
+  
+  # Consider 3 error distributions
+  nbinom2 = glmmTMB(duration_count ~ Type*MAP + (1|Number), data=eledat, family="nbinom2")
+  poisson = glmmTMB(duration_count ~ Type*MAP + (1|Number), data=eledat, family="poisson")
+  tweedie = glmmTMB(duration_count ~ Type*MAP + (1|Number), data=eledat, family="tweedie")
+
+  # Compare AICc values to decide best model
+  comp = as.data.frame(bbmle::AICctab(nbinom2, poisson, tweedie))
+  
+  bestfam = get(rownames(comp)[1])
+  sc = summary(bestfam)
+  
+  # Drop interaction between MAP and Type if not significant
+    if(sc$coefficients$cond[4,4] > 0.05){
+      elemodc = glmmTMB(duration_count ~ Type+MAP + (1|Number), data=eledat, family=paste(rownames(comp)[1]))
+    }else{
+      elemodc = bestfam
+    }
+  
+  # Check and store residual diagnostics
+  rescheck = testResiduals(simulateResiduals(elemodc), plot=F)
+  resdf = data.frame(model="duration_count", uniformity=rescheck$uniformity$p.value, dispersion = rescheck$dispersion$p.value, outliers=rescheck$outliers$p.value)
+  
+  
+  # Repeat for grazing
+  nbinom2 = glmmTMB(duration_graze ~ Type*MAP + (1|Number), data=eledat, family="nbinom2")
+  poisson = glmmTMB(duration_graze ~ Type*MAP + (1|Number), data=eledat, family="poisson")
+  tweedie = glmmTMB(duration_graze ~ Type*MAP + (1|Number), data=eledat, family="tweedie")
+  
+  comp2 = as.data.frame(bbmle::AICctab(nbinom2, poisson, tweedie))
+  
+  bestfam = get(rownames(comp2)[1])
+  sc = summary(bestfam)
+  
+    if(sc$coefficients$cond[4,4] > 0.05){
+      elemodg = glmmTMB(duration_graze ~ Type+MAP + (1|Number), data=eledat, family=paste(rownames(comp2)[1]))
+    }else{
+      elemodg = bestfam
+    }
+  
+  # Check and store residuals
+  rescheck = testResiduals(simulateResiduals(elemodg), plot=F)
+  resdf2 = data.frame(model="duration_graze", uniformity=rescheck$uniformity$p.value, dispersion = rescheck$dispersion$p.value, outliers=rescheck$outliers$p.value)
+  resdf = rbind(resdf, resdf2)
+  
+  
+    return(list(family_count = comp, family_graze = comp2, best_count = elemodc, best_graze=elemodg, residual_diagnostics = resdf, species_df = eledat))
+}
+
+
+```
+
+
+### 1.1.3 Apply function to Mpala data {.tabset}
+
+#### Elephant
+```{r, results="hide"}
+
+els = analyze("ELEPHANT", mpdata)
+```
+
+```{r}
+els$family_count
+els$family_graze
+els$residual_diagnostics
+
+els$species_df$predc = predict(els$best_count, type="response")
+els$species_df$predg = predict(els$best_graze, type="response")
+
+epc = ggplot(els$species_df, aes(x=MAP, y=duration_count))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predc, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+epg = ggplot(els$species_df, aes(x=MAP, y=duration_graze))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predg, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+# Visualize predicted and observed to check fit
+gridExtra::grid.arrange(epc, epg, ncol=2)
+```
+
+#### Zebra
+
+```{r, results="hide", eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+zebs = analyze("ZEBRA", mpdata)
+```
+
+```{r,eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+zebs$family_count
+zebs$family_graze
+zebs$residual_diagnostics
+
+zebs$species_df$predc = predict(zebs$best_count, type="response")
+zebs$species_df$predg = predict(zebs$best_graze, type="response")
+
+zpc = ggplot(zebs$species_df, aes(x=MAP, y=duration_count))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predc, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+zpg = ggplot(zebs$species_df, aes(x=MAP, y=duration_graze))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predg, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+gridExtra::grid.arrange(zpc, zpg, ncol=2)
+
+```
+
+#### Impala
+
+```{r, results="hide", eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+imps = analyze("IMPALA", mpdata)
+```
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+imps$family_count
+imps$family_graze
+imps$residual_diagnostics
+
+imps$species_df$predc = predict(imps$best_count, type="response")
+imps$species_df$predg = predict(imps$best_graze, type="response")
+
+ipc = ggplot(imps$species_df, aes(x=MAP, y=duration_count))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predc, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+ipg = ggplot(imps$species_df, aes(x=MAP, y=duration_graze))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predg, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+gridExtra::grid.arrange(ipc, ipg, ncol=2)
+
+```
+
+#### Giraffe
+
+```{r, results="hide", eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+girs = analyze("GIRAFFE", mpdata)
+```
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+girs$family_count
+girs$family_graze
+girs$residual_diagnostics
+
+girs$species_df$predc = predict(girs$best_count, type="response")
+girs$species_df$predg = predict(girs$best_graze, type="response")
+
+gpc = ggplot(girs$species_df, aes(x=MAP, y=duration_count))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  #geom_point(aes(col=Type))+
+  geom_smooth(method="lm", aes(y=predc, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+gpg = ggplot(girs$species_df, aes(x=MAP, y=duration_graze))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  #geom_point(aes(col=Type))+
+  geom_smooth(method="lm", aes(y=predg, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+gridExtra::grid.arrange(gpc, gpg, ncol=2)
+
+```
+
+#### Cattle
+
+```{r, results="hide", eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+cows = analyze("CATTLE", mpdata)
+```
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+cows$family_count
+cows$family_graze
+cows$residual_diagnostics
+
+cows$species_df$predc = predict(cows$best_count, type="response")
+cows$species_df$predg = predict(cows$best_graze, type="response")
+
+cpc = ggplot(cows$species_df, aes(x=MAP, y=duration_count))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predc, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+cpg = ggplot(cows$species_df, aes(x=MAP, y=duration_graze))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predg, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+gridExtra::grid.arrange(cpc, cpg, ncol=2)
+
+
+```
+
+#### Buffalo
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+bufs = analyze("BUFFALO", mpdata)
+```
+
+```{r, results="hide", eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+bufs$family_count
+bufs$family_graze
+bufs$residual_diagnostics
+
+bufs$species_df$predc = predict(bufs$best_count, type="response")
+bufs$species_df$predg = predict(bufs$best_graze, type="response")
+
+bpc = ggplot(bufs$species_df, aes(x=MAP, y=duration_count))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predc, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+bpg = ggplot(bufs$species_df, aes(x=MAP, y=duration_graze))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predg, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+gridExtra::grid.arrange(bpc, bpg, ncol=2)
+```
+
+
+#### All animals
+
+```{r, results="hide", eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+alldat = mpdata %>% 
+    group_by(Type, Number, Month, Day, Year, MAP) %>% 
+    summarize_at(vars(count:duration_graze), funs(sum)) %>% 
+  ungroup()
+      
+alldat$choice = "ALL"
+
+all = analyze("ALL", alldat)
+```
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+all$family_count
+all$family_graze
+all$residual_diagnostics
+
+all$species_df$predc = predict(all$best_count, type="response")
+all$species_df$predg = predict(all$best_graze, type="response")
+
+apc = ggplot(all$species_df, aes(x=MAP, y=duration_count))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predc, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+apg = ggplot(all$species_df, aes(x=MAP, y=duration_graze))+
+  geom_smooth(method = "lm", aes(col=Type), se=F)+
+  geom_smooth(method="lm", aes(y=predg, col=Type), linetype="dotted", se=F)+
+  theme_bw()
+
+gridExtra::grid.arrange(apc, apg, ncol=2)
+
+
+all$species_df %>% 
+  group_by(MAP, Type) %>% 
+  mutate_at(.vars = "duration_count", .funs = mean) %>%
+  ungroup() %>% 
+  ggplot(aes(x=MAP, y=duration_count))+
+  geom_point(aes(col=Type))+
+  geom_smooth(method="lm", aes(col=Type))
+
+```
+
+
+
+```{r, include=FALSE}
+
+# Create function that will take a list of models and make a dataframe of results:
+
+make_results_table = function(data_table_list, vector_of_model_names){
+  
+  # empty df
+  results = data.frame()
+  
+  for(i in 1:length(data_table_list)){
+    mod = data_table_list[[i]]
+    sum = summary(mod)
+    coefdf = as.data.frame(sum$coefficients$cond)
+    coefdf = coefdf %>% select(Estimate:`Pr(>|z|)`) %>% 
+      mutate_at(vars(Estimate:`Pr(>|z|)`), funs( round(., digits = 2)))
+    coefdf$row1 = paste(coefdf$Estimate, "\U00B1", coefdf$`Std. Error`)
+    coefdf$row2 = paste(coefdf$`z value`, " (", coefdf$`Pr(>|z|)`, ")", sep="")
+    
+    tcoefdf = t(coefdf[,c((dim(coefdf)[2]-1):dim(coefdf)[2])])
+    tcoefdf = as.data.frame(tcoefdf)
+    tcoefdf$R2[c(1,2)] = c(round(performance::r2(mod)[[1]],2), round(performance::r2(mod)[[2]],2))
+    tcoefdf$Sigma[c(1,2)] = c(round(sum$sigma,2), round(unlist(sum$varcor$cond[1]),2))
+    
+    # Insert species information
+    Species = vector_of_model_names[i]
+    tcoefdf = cbind(Species, tcoefdf)
+    
+    # Insert additional model information
+    tcoefdf$Family = mod$modelInfo$family$family
+    tcoefdf$Observations = sum$nobs
+    
+    results = bind_rows(results, tcoefdf)
+  }
+  
+  return(results)
+  
+}
+
+```
+
+### 1.1.4 View Results
+```{r, eval = DEMO_ANALYSIS, echo=FALSE}
+# Create results table and apply formatting: 
+
+results = make_results_table(list(els$best_count,
+                                  els$best_graze),
+                             c("Elephant_Count", "Elephant_Graze"))
+
+
+#### Additional cleaning steps
+# parse species column
+
+results = cbind(matrix(unlist(str_split(results$Species, "_")), ncol=2, byrow = T), results)
+results = results[,-3]
+names(results)[c(1,2)] = c("Species", "Model")
+
+results = results %>%
+  mutate_at(vars(Family), funs(ifelse(. == "tweedie", "Tweedie", ifelse(. == "nbinom2", "N. Binom.", .))))
+
+
+# flextable
+resultsf = flextable(results)
+resultsf = merge_v(resultsf, j = ~ Species + Model)
+
+merge_vertical_intervals = function(flextableID, interval_size, colid){
+  for(j in colid){
+    
+    for(i in 1:(dim(flextableID$body$dataset)[1]/2)){
+      interval = seq( from = interval_size*i - (interval_size-1), to = interval_size*i)
+      flextableID = merge_at(flextableID, i = interval, j = j)
+    }
+  }
+  return(flextableID)
+}
+
+# use col ids to reference different data columns
+regcols = c("Species", "Model", "R2", "Sigma", "Family", "Observations")
+nondataids = which(names(results) %in% regcols)
+datacols = names(results)[-nondataids]
+datacolids = which(names(results)%in%datacols)
+ncols = length(names(results))
+
+resultsf = merge_vertical_intervals(resultsf, 2, c((ncols-1):ncols))
+
+# Adjust formatting
+resultsf = resultsf %>%
+  fontsize(size=8 , part="all") %>% 
+  font(fontname = "Times New Roman", part = "all") %>%
+  set_header_labels(TypeWH = "Water", `TypeWH:MAP` = "Water:MAP", Random1="Tau", Observations="N") %>%
+  width(width = 0.5, j= nondataids) %>%
+  width(width = 0.9, j= datacolids) %>%
+  align(align="center", part="all") %>% 
+  valign(i = seq(1,(dim(results)[1]), by=2),
+                  j = c(datacolids, which(names(results)%in%c("R2","Sigma"))),
+                  valign="bottom") %>%
+  valign(i = seq(2,(dim(results)[1]), by=2),
+                  j = c(datacolids, which(names(results)%in%c("R2","Sigma"))),
+                  valign="top") %>%
+  height_all(height=0.1, part="body")
+
+flextable:::knit_print.flextable(resultsf)  
+
+print(resultsf,preview="html")
+```
+
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+# Create results table and apply formatting: 
+
+results = make_results_table(list(all$best_count,
+                                  all$best_graze,
+                                  cows$best_count,
+                                  cows$best_graze,
+                                  els$best_count,
+                                  els$best_graze,
+                                  zebs$best_count,
+                                  zebs$best_graze,
+                                  bufs$best_count,
+                                  bufs$best_graze,
+                                  imps$best_count,
+                                  imps$best_graze,
+                                  girs$best_count,
+                                  girs$best_graze),
+                             c("All_Count", "All_Graze",
+                               "Cattle_Count", "Cattle_Graze",
+                               "Elephant_Count", "Elephant_Graze",
+                               "Zebra_Count", "Zebra_Graze",
+                               "Buffalo_Count", "Buffalo_Graze",
+                               "Impala_Count", "Impala_Graze",
+                               "Giraffe_Count", "Giraffe_Graze"))
+
+
+#### Additional cleaning steps
+# parse species column
+
+results = cbind(matrix(unlist(str_split(results$Species, "_")), ncol=2, byrow = T), results)
+results = results[,-3]
+names(results)[c(1,2)] = c("Species", "Model")
+
+# rearrange
+results = results[,c(1:5, 10, 6:9)]
+
+results = results %>%
+  mutate_at(vars(Family), funs(ifelse(. == "tweedie", "Tweedie", ifelse(. == "nbinom2", "N. Binom.", .))))
+
+
+# flextable
+resultsf = flextable(results)
+resultsf = merge_v(resultsf, j = ~ Species + Model)
+
+merge_vertical_intervals = function(flextableID, interval_size, colid){
+  for(j in colid){
+    
+    for(i in 1:(dim(flextableID$body$dataset)[1]/2)){
+      interval = seq( from = interval_size*i - (interval_size-1), to = interval_size*i)
+      flextableID = merge_at(flextableID, i = interval, j = j)
+    }
+  }
+  return(flextableID)
+}
+
+# use col ids to reference different data columns
+regcols = c("Species", "Model", "R2", "Sigma", "Family", "Observations")
+nondataids = which(names(results) %in% regcols)
+datacols = names(results)[-nondataids]
+datacolids = which(names(results)%in%datacols)
+ncols = length(names(results))
+
+resultsf = merge_vertical_intervals(resultsf, 2, c((ncols-1):ncols))
+
+# Adjust formatting
+resultsf = resultsf %>%
+  fontsize(size=8 , part="all") %>% 
+  font(fontname = "Times New Roman", part = "all") %>%
+  set_header_labels(TypeWH = "Water", `TypeWH:MAP` = "Water:MAP", Random1="Tau", Observations="N") %>%
+  width(width = 0.5, j= nondataids) %>%
+  width(width = 0.9, j= datacolids) %>%
+  align(align="center", part="all") %>% 
+  valign(i = seq(1,(dim(results)[1]), by=2),
+                  j = c(datacolids, which(names(results)%in%c("R2","Sigma"))),
+                  valign="bottom") %>%
+  valign(i = seq(2,(dim(results)[1]), by=2),
+                  j = c(datacolids, which(names(results)%in%c("R2","Sigma"))),
+                  valign="top") %>%
+  height_all(height=0.1, part="body")
+
+flextable:::knit_print.flextable(resultsf)  
+print(resultsf,preview = "html")
+```
+
+
+## 1.2 Ol Pejeta Data
+
+### 1.2.1 Read in data
+```{r}
+
+opdata = read.csv("OPCcameras.csv")
+
+opdata$status = factor(opdata$status, levels=c("Pre", "During", "Post"))
+
+# Mean daily activity
+opdata %>%
+  select(choice, Treatment, Location, status, Month, Day, Year, dcount:dgraze) %>% 
+  pivot_longer(cols=c(dcount:dgraze)) %>% 
+  group_by(choice, Treatment, Location, status, name) %>% 
+  summarize_at(vars(value), funs(mean)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x=reorder(choice, -value), y=value+1))+
+  geom_col(aes(fill=name), position="stack")+
+  facet_wrap(~Treatment+status)+
+  scale_y_log10()+
+  scale_fill_manual(values=c("gray60", "dodgerblue", "green3"))+
+  theme(axis.text.x = element_text(angle=90, hjust=1, vjust=0))
+
+```
+
+
+### 1.2.2 Create OPC 'analyze' function
+
+```{r}
+
+analyze_op = function(species, df){
+  eledat = df %>% 
+      filter(choice==species, Treatment %in% c("WPC", "WPM"))
+  eledat$status = factor(eledat$status, levels=c("Pre", "During", "Post"))
+
+  nbinom2 = glmmTMB(dcount ~ Treatment*status + (1|Location)+(1|Month), data=eledat, family="nbinom2")
+  poisson = glmmTMB(dcount ~ Treatment*status + (1|Location)+(1|Month), data=eledat, family="poisson")
+  tweedie = glmmTMB(dcount ~ Treatment*status + (1|Location)+(1|Month), data=eledat, family="tweedie")
+
+  comp = as.data.frame(bbmle::AICctab(nbinom2, poisson, tweedie))
+  
+  bestfam = get(rownames(comp)[1])
+  sc = summary(bestfam)
+  
+  # no selection this time
+  elemodc = bestfam
+
+  # check resids
+  rescheck = testResiduals(simulateResiduals(elemodc), plot=F)
+  resdf = data.frame(model="duration_count", uniformity=rescheck$uniformity$p.value, dispersion = rescheck$dispersion$p.value, outliers=rescheck$outliers$p.value)
+  
+  
+  #repeat for grazing
+  nbinom2 = glmmTMB(dgraze ~ Treatment*status + (1|Location)+(1|Month), data=eledat, family="nbinom2")
+  poisson = glmmTMB(dgraze ~ Treatment*status + (1|Location)+(1|Month), data=eledat, family="poisson")
+  tweedie = glmmTMB(dgraze ~ Treatment*status + (1|Location)+(1|Month), data=eledat, family="tweedie")
+  
+  comp2 = as.data.frame(bbmle::AICctab(nbinom2, poisson, tweedie))
+  
+  bestfam = get(rownames(comp2)[1])
+  sc = summary(bestfam)
+  
+  elemodg = bestfam
+  
+  # check resids
+  rescheck = testResiduals(simulateResiduals(elemodg), plot=F)
+  resdf2 = data.frame(model="duration_drink", uniformity=rescheck$uniformity$p.value, dispersion = rescheck$dispersion$p.value, outliers=rescheck$outliers$p.value)
+
+  
+  #repeat for drinking
+  nbinom2 = glmmTMB(ddrink ~ Treatment*status + (1|Location)+(1|Month), data=eledat, family="nbinom2")
+  poisson = glmmTMB(ddrink ~ Treatment*status + (1|Location)+(1|Month), data=eledat, family="poisson")
+  tweedie = glmmTMB(ddrink ~ Treatment*status + (1|Location)+(1|Month), data=eledat, family="tweedie")
+  
+  
+  comp3 = as.data.frame(bbmle::AICctab(nbinom2, poisson, tweedie))
+  
+  bestfam = get(rownames(comp3)[1])
+  sc = summary(bestfam)
+  
+  elemodd = bestfam
+  
+  # check resids
+  rescheck = testResiduals(simulateResiduals(elemodd), plot=F)
+  resdf3 = data.frame(model="duration_drink", uniformity=rescheck$uniformity$p.value, dispersion = rescheck$dispersion$p.value, outliers=rescheck$outliers$p.value)
+  
+  resdf = rbind(resdf, resdf2, resdf3)
+  
+  
+    #print(tab_model(elemodc, elemodg, show.ci=F, show.stat=T, show.se=T, transform = NULL))
+    return(list(family_count = comp, family_graze = comp2, family_drink = comp3, best_count = elemodc, best_graze=elemodg, best_drink=elemodd, residual_diagnostics = resdf, species_df = eledat))
+}
+
+
+```
+
+
+
+### 1.2.3 Apply function to OPC data {.tabset}
+
+
+#### Elephant
+
+```{r, results="hide"}
+
+eleop = analyze_op("ELEPHANT", opdata)
+```
+
+```{r}
+eleop$family_count
+eleop$family_graze
+eleop$residual_diagnostics
+
+eleop$species_df$predc = predict(eleop$best_count, type="response")
+eleop$species_df$predg = predict(eleop$best_graze, type="response")
+
+ems = as.data.frame(emmeans(eleop$best_count, ~Treatment*status, adjust="fdr", type="response"))
+actual = Rmisc::summarySE(eleop$species_df, groupvars=c("Treatment", "status"), measurevar="dcount")
+
+plotit = left_join(ems,actual)
+
+plotit$status = factor(plotit$status, levels=c("Pre", "During", "Post"))
+
+ggplot(plotit, aes(x=Treatment, y=dcount))+
+  geom_point(position=position_nudge(x=-0.1))+
+  geom_point(aes(y=response), position=position_nudge(x=0.1), col="red")+
+  geom_errorbar(aes(ymin=dcount-ci, ymax=dcount+ci), position=position_nudge(x=-0.1), width=0.5)+
+  geom_errorbar(aes(y=response, ymin=lower.CL, ymax=upper.CL), position=position_nudge(x=0.1), width=0.5, col="red")+
+  facet_wrap(~status)+
+  theme_bw()
+
+```
+
+
+#### Cattle
+
+```{r, results="hide",eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+cowop = analyze_op("CATTLE", opdata)
+```
+
+```{r,eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+cowop$family_count
+cowop$family_graze
+cowop$residual_diagnostics
+
+cowop$species_df$predc = predict(cowop$best_count, type="response")
+cowop$species_df$predg = predict(cowop$best_graze, type="response")
+
+ems = as.data.frame(emmeans(cowop$best_count, ~Treatment*status, adjust="fdr", type="response"))
+actual = Rmisc::summarySE(cowop$species_df, groupvars=c("Treatment", "status"), measurevar="dcount")
+
+plotit = left_join(ems,actual)
+
+plotit$status = factor(plotit$status, levels=c("Pre", "During", "Post"))
+
+ggplot(plotit, aes(x=Treatment, y=dcount))+
+  geom_point(position=position_nudge(x=-0.1))+
+  geom_point(aes(y=response), position=position_nudge(x=0.1), col="red")+
+  geom_errorbar(aes(ymin=dcount-ci, ymax=dcount+ci), position=position_nudge(x=-0.1), width=0.5)+
+  geom_errorbar(aes(y=response, ymin=lower.CL, ymax=upper.CL), position=position_nudge(x=0.1), width=0.5, col="red")+
+  facet_wrap(~status)+
+  theme_bw()
+
+```
+
+#### Zebra
+
+```{r, results="hide",eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+zebop = analyze_op("ZEBRA", opdata)
+```
+
+```{r,eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+zebop$family_count
+zebop$family_graze
+zebop$residual_diagnostics
+
+zebop$species_df$predc = predict(zebop$best_count, type="response")
+zebop$species_df$predg = predict(zebop$best_graze, type="response")
+ems = as.data.frame(emmeans(zebop$best_count, ~Treatment*status, adjust="fdr", type="response"))
+
+actual = Rmisc::summarySE(zebop$species_df, groupvars=c("Treatment", "status"), measurevar="dcount")
+
+plotit = left_join(ems,actual)
+
+plotit$status = factor(plotit$status, levels=c("Pre", "During", "Post"))
+
+ggplot(plotit, aes(x=Treatment, y=dcount))+
+  geom_point(position=position_nudge(x=-0.1))+
+  geom_point(aes(y=response), position=position_nudge(x=0.1), col="red")+
+  geom_errorbar(aes(ymin=dcount-ci, ymax=dcount+ci), position=position_nudge(x=-0.1), width=0.5)+
+  geom_errorbar(aes(y=response, ymin=lower.CL, ymax=upper.CL), position=position_nudge(x=0.1), width=0.5, col="red")+
+  facet_wrap(~status)+
+  theme_bw()
+
+```
+
+#### Buffalo
+
+```{r, results="hide",eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+bufop = analyze_op("BUFFALO", opdata)
+```
+
+```{r,eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+bufop$family_count
+bufop$family_graze
+bufop$residual_diagnostics
+
+bufop$species_df$predc = predict(bufop$best_count, type="response")
+bufop$species_df$predg = predict(bufop$best_graze, type="response")
+actual = Rmisc::summarySE(bufop$species_df, groupvars=c("Treatment", "status"), measurevar="dcount")
+
+plotit = left_join(ems,actual)
+
+plotit$status = factor(plotit$status, levels=c("Pre", "During", "Post"))
+
+ggplot(plotit, aes(x=Treatment, y=dcount))+
+  geom_point(position=position_nudge(x=-0.1))+
+  geom_point(aes(y=response), position=position_nudge(x=0.1), col="red")+
+  geom_errorbar(aes(ymin=dcount-ci, ymax=dcount+ci), position=position_nudge(x=-0.1), width=0.5)+
+  geom_errorbar(aes(y=response, ymin=lower.CL, ymax=upper.CL), position=position_nudge(x=0.1), width=0.5, col="red")+
+  facet_wrap(~status)+
+  theme_bw()
+
+```
+
+#### Impala
+
+```{r, results="hide",eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+impop = analyze_op("IMPALA", opdata)
+```
+
+```{r,eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+impop$family_count
+impop$family_graze
+impop$residual_diagnostics
+
+impop$species_df$predc = predict(impop$best_count, type="response")
+impop$species_df$predg = predict(impop$best_graze, type="response")
+
+actual = Rmisc::summarySE(impop$species_df, groupvars=c("Treatment", "status"), measurevar="dcount")
+
+plotit = left_join(ems,actual)
+
+plotit$status = factor(plotit$status, levels=c("Pre", "During", "Post"))
+
+ggplot(plotit, aes(x=Treatment, y=dcount))+
+  geom_point(position=position_nudge(x=-0.1))+
+  geom_point(aes(y=response), position=position_nudge(x=0.1), col="red")+
+  geom_errorbar(aes(ymin=dcount-ci, ymax=dcount+ci), position=position_nudge(x=-0.1), width=0.5)+
+  geom_errorbar(aes(y=response, ymin=lower.CL, ymax=upper.CL), position=position_nudge(x=0.1), width=0.5, col="red")+
+  facet_wrap(~status)+
+  theme_bw()
+
+```
+
+#### Giraffe
+
+```{r, results="hide",eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+girop = analyze_op("GIRAFFE", opdata)
+```
+
+```{r,eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+girop$family_count
+girop$family_graze
+girop$residual_diagnostics
+
+girop$species_df$predc = predict(girop$best_count, type="response")
+girop$species_df$predg = predict(girop$best_graze, type="response")
+
+ems = as.data.frame(emmeans(girop$best_count, ~Treatment*status, adjust="fdr", type="response"))
+
+actual = Rmisc::summarySE(girop$species_df, groupvars=c("Treatment", "status"), measurevar="dcount")
+
+plotit = left_join(ems,actual)
+
+plotit$status = factor(plotit$status, levels=c("Pre", "During", "Post"))
+
+ggplot(plotit, aes(x=Treatment, y=dcount))+
+  geom_point(position=position_nudge(x=-0.1))+
+  geom_point(aes(y=response), position=position_nudge(x=0.1), col="red")+
+  geom_errorbar(aes(ymin=dcount-ci, ymax=dcount+ci), position=position_nudge(x=-0.1), width=0.5)+
+  geom_errorbar(aes(y=response, ymin=lower.CL, ymax=upper.CL), position=position_nudge(x=0.1), width=0.5, col="red")+
+  facet_wrap(~status)+
+  theme_bw()
+
+```
+
+#### All animals
+
+```{r, warning=F, results="hide", eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+allop = opdata %>% 
+    group_by(Treatment, Location, status, Month, Day, Year) %>% 
+    summarize_at(vars(mean_count:dgraze), funs(sum)) %>% 
+  ungroup()
+
+      
+allop$choice = "ALL"
+
+# takes about a minute to run
+allOP = analyze_op("ALL", allop)
+```
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+allOP$family_count
+allOP$family_graze
+allOP$residual_diagnostics
+
+allOP$species_df$predc = predict(allOP$best_count, type="response")
+allOP$species_df$predg = predict(allOP$best_graze, type="response")
+
+ems = as.data.frame(emmeans(allOP$best_count, ~Treatment*status, adjust="fdr", type="response"))
+# observed
+actual = Rmisc::summarySE(allOP$species_df, groupvars=c("Treatment", "status"), measurevar="dcount")
+
+plotit = left_join(ems,actual)
+
+plotit$status = factor(plotit$status, levels=c("Pre", "During", "Post"))
+
+ggplot(plotit, aes(x=Treatment, y=dcount))+
+  geom_point(position=position_nudge(x=-0.1))+
+  geom_point(aes(y=response), position=position_nudge(x=0.1), col="red")+
+  geom_errorbar(aes(ymin=dcount-ci, ymax=dcount+ci), position=position_nudge(x=-0.1), width=0.5)+
+  geom_errorbar(aes(y=response, ymin=lower.CL, ymax=upper.CL), position=position_nudge(x=0.1), width=0.5, col="red")+
+  facet_wrap(~status)+
+  theme_bw()
+
+```
+
+### 1.2.4 View Results
+
+```{r, echo=FALSE, warning=FALSE,eval=DEMO_ANALYSIS}
+
+opresults = make_results_table(list(eleop$best_count,
+                   eleop$best_graze,
+                   eleop$best_drink),
+                   c("Elephant_Count", "Elephant_Graze", "Elephant_Drink"))
+
+#### Additional cleaning steps
+# parse the species column
+opresults = cbind(matrix(unlist(str_split(opresults$Species, "_")), ncol=2, byrow = T), opresults)
+opresults = opresults[,-3]
+names(opresults)[c(1,2)] = c("Species", "Model")
+
+
+opresults = opresults %>% mutate_at(vars(Family), funs(ifelse(. == "tweedie", "T", ifelse(. == "nbinom2", "NB", .))))
+
+
+#### Flextable formatting
+
+opresultsf = flextable(opresults)
+opresultsf = merge_v(opresultsf, j = ~ Species + Model)
+
+merge_vertical_intervals = function(flextableID, interval_size, colid){
+  for(j in colid){
+    
+    for(i in 1:(dim(flextableID$body$dataset)[1]/interval_size)){
+      interval = seq( from = interval_size*i - (interval_size-1), to = interval_size*i)
+      flextableID = merge_at(flextableID, i = interval, j = j)
+    }
+  }
+  return(flextableID)
+}
+
+
+# Use col ids to reference different data columns
+regcols = c("Species", "Model", "R2", "Sigma", "Family", "Observations")
+nondataids = which(names(opresults) %in% regcols)
+datacols = names(opresults)[-nondataids]
+datacolids = which(names(opresults)%in%datacols)
+ncols = length(names(opresults))
+
+opresultsf = merge_vertical_intervals(opresultsf, 2, c((ncols-1):ncols))
+
+# Additional formatting
+opresultsf = opresultsf %>%
+  fontsize(size=8 , part="all") %>%
+  font(fontname = "Times New Roman", part = "all") %>%
+  set_header_labels(TreatmentWPM = "Drained", statusDuring = "Pre", statusPost="Post", `TreatmentWPM:statusDuring`="During:Drained",`TreatmentWPM:statusPost`="Post:Drained", Observations="N") %>%
+  width(width = 0.5, j= nondataids) %>%
+  width(width = 0.9, j= datacolids) %>%
+  align(align="center", part="all") %>% 
+  valign(i = seq(1,(dim(opresults)[1]), by=2),
+                  j = c(datacolids, which(names(opresults)%in%c("R2","Sigma"))),
+                  valign="bottom") %>% 
+  valign(i = seq(2,(dim(opresults)[1]), by=2),
+                  j = c(datacolids, which(names(opresults)%in%c("R2","Sigma"))),
+                  valign="top") %>%
+  height_all(height=0.1)
+
+flextable:::knit_print.flextable(opresultsf)
+print(opresultsf,preview="html")
+```
+
+
+```{r, include=FALSE, warning=FALSE,message=F,eval=FULL_ANALYSIS}
+
+opresults = make_results_table(list(allOP$best_count,
+                   allOP$best_graze,
+                   allOP$best_drink,
+                   cowop$best_count,
+                   cowop$best_graze,
+                   cowop$best_drink,
+                   eleop$best_count,
+                   eleop$best_graze,
+                   eleop$best_drink,
+                   zebop$best_count,
+                   zebop$best_graze,
+                   zebop$best_drink,
+                   bufop$best_count,
+                   bufop$best_graze,
+                   bufop$best_drink,
+                   impop$best_count,
+                   impop$best_graze,
+                   impop$best_drink,
+                   girop$best_count,
+                   girop$best_graze,
+                   girop$best_drink
+                   ),
+                   c("All_Count", "All_Graze", "All_Drink",
+                     "Cattle_Count", "Cattle_Graze", "Cattle_Drink",
+                     "Elephant_Count", "Elephant_Graze", "Elephant_Drink",
+                     "Zebra_Count", "Zebra_Graze", "Zebra_Drink", 
+                     "Buffalo_Count", "Buffalo_Graze", "Buffalo_Drink",
+                     "Impala_Count", "Impala_Graze", "Impala_Drink",
+                     "Giraffe_Count", "Giraffe_Graze","Giraffe_Drink")
+                   )
+
+```
+
+```{r, echo=FALSE,eval=FULL_ANALYSIS}
+
+#### Additional cleaning steps
+# parse the species column
+opresults = cbind(matrix(unlist(str_split(opresults$Species, "_")), ncol=2, byrow = T), opresults)
+opresults = opresults[,-3]
+names(opresults)[c(1,2)] = c("Species", "Model")
+
+
+opresults = opresults %>% mutate_at(vars(Family), funs(ifelse(. == "tweedie", "T", ifelse(. == "nbinom2", "NB", .))))
+
+
+#### Flextable formatting
+
+opresultsf = flextable(opresults)
+opresultsf = merge_v(opresultsf, j = ~ Species + Model)
+
+merge_vertical_intervals = function(flextableID, interval_size, colid){
+  for(j in colid){
+    
+    for(i in 1:(dim(flextableID$body$dataset)[1]/interval_size)){
+      interval = seq( from = interval_size*i - (interval_size-1), to = interval_size*i)
+      flextableID = merge_at(flextableID, i = interval, j = j)
+    }
+  }
+  return(flextableID)
+}
+
+
+# Use col ids to reference different data columns
+regcols = c("Species", "Model", "R2", "Sigma", "Family", "Observations")
+nondataids = which(names(opresults) %in% regcols)
+datacols = names(opresults)[-nondataids]
+datacolids = which(names(opresults)%in%datacols)
+ncols = length(names(opresults))
+
+opresultsf = merge_vertical_intervals(opresultsf, 2, c((ncols-1):ncols))
+
+# Additional formatting
+opresultsf = opresultsf %>%
+  fontsize(size=8 , part="all") %>%
+  font(fontname = "Times New Roman", part = "all") %>%
+  set_header_labels(TreatmentWPM = "Drained", statusDuring = "Pre", statusPost="Post", `TreatmentWPM:statusDuring`="During:Drained",`TreatmentWPM:statusPost`="Post:Drained", Observations="N") %>%
+  width(width = 0.5, j= nondataids) %>%
+  width(width = 0.9, j= datacolids) %>%
+  align(align="center", part="all") %>% 
+  valign(i = seq(1,(dim(opresults)[1]), by=2),
+                  j = c(datacolids, which(names(opresults)%in%c("R2","Sigma"))),
+                  valign="bottom") %>% 
+  valign(i = seq(2,(dim(opresults)[1]), by=2),
+                  j = c(datacolids, which(names(opresults)%in%c("R2","Sigma"))),
+                  valign="top") %>%
+  height_all(height=0.1)
+
+flextable:::knit_print.flextable(opresultsf)
+print(opresultsf,preview="html")
+
+
+```
+
+
+## 1.3 Additional Figures and Analysis
+
+
+### 1.3.1 Mpala (Observational) Data Plot
+
+```{r, eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+ 
+mplong =  mpdata %>%
+  pivot_longer(cols=c(duration_count:duration_graze), names_to="Activity", values_to="Ind_Secs") %>% 
+  group_by(choice, Number, Activity, Type) %>% 
+  summarize_at(vars(Ind_Secs), funs(mean)) %>% 
+  ungroup()
+
+# # Find estimates for each model
+# # Total
+# mpel = as.data.frame(emmeans(els$best_count, ~Type), type = "response")
+# mpcow = as.data.frame(emmeans(cows$best_count, ~Type), type = "response")
+# mpzeb = as.data.frame(emmeans(zebs$best_count, ~Type), type = "response")
+# mpbuf = as.data.frame(emmeans(bufs$best_count, ~Type), type = "response")
+# mpimp = as.data.frame(emmeans(imps$best_count, ~Type), type = "response")
+# mpgir = as.data.frame(emmeans(girs$best_count, ~Type), type = "response")
+# # Grazing
+# mpelg = as.data.frame(emmeans(els$best_graze, ~Type), type = "response")
+# mpcowg = as.data.frame(emmeans(cows$best_graze, ~Type), type = "response")
+# mpzebg = as.data.frame(emmeans(zebs$best_graze, ~Type), type = "response")
+# mpbufg = as.data.frame(emmeans(bufs$best_graze, ~Type), type = "response")
+# mpimpg = as.data.frame(emmeans(imps$best_graze, ~Type), type = "response")
+# mpgirg = as.data.frame(emmeans(girs$best_graze, ~Type), type = "response")
+# 
+# # combine
+# mpnewci = rbind(mpel,mpcow,mpzeb,mpbuf,mpimp,mpgir, mpelg,mpcowg,mpzebg,mpbufg,mpimpg,mpgirg)
+# 
+# # add labels and format them correctly
+# mpnewci$choice = c(rep("ELEPHANT",2),rep("CATTLE",2),rep("ZEBRA",2),rep("BUFFALO",2), rep("IMPALA",2),rep("GIRAFFE",2))
+# mpnewci$Activity = c(rep("duration_count",12), rep("duration_graze",12))
+# mpnewci$Activity = factor(mpnewci$Activity, levels=c("duration_count","duration_graze"))
+
+#facet_names_mp = c("Total", "Grazing")
+#names(facet_names_mp) = c("duration_count", "duration_graze")
+
+mpnewci2 = mplong %>% 
+  filter(Activity =="duration_graze") %>% 
+  Rmisc::summarySE(.,groupvars=c("choice","Type"), measurevar = "Ind_Secs")
+
+mpnewci2$Type= factor(mpnewci2$Type, levels=c("CONT", "WH"))
+mpnewci2$choice = factor(mpnewci2$choice, levels=c("ELEPHANT", "ZEBRA", "CATTLE", "BUFFALO", "IMPALA", "GIRAFFE"))
+
+# Create plot
+mp_activity = ggplot(mpnewci2,
+                     aes(x=choice, y=Ind_Secs, col=Type))+
+  geom_errorbar(aes(ymin = Ind_Secs-se+0.01, ymax = Ind_Secs+se),
+                position = position_dodge(width=0.3),
+                width=0.3,
+                size=1.1)+
+  geom_point(position = position_dodge(width=0.3), size=1.5)+
+  geom_point(data=mplong,
+             aes(x=choice, y=Ind_Secs+0.01, col=Type),
+             size=0.9,
+             alpha=0.4,
+             position=position_dodge(width=0.3))+
+  scale_color_manual(values=c("orangered", "steelblue3"))+
+  scale_y_log10()+
+  theme_bw(base_size = 14)+
+    guides(col=F)+
+  theme(axis.text.x = element_text(angle=90))
+
+mp_activity
+
+#ggsave("fig2_panelE.png", mp_activity, device="png", dpi=300, width=6, height=4)
+
+```
+
+```{r, eval=DEMO_ANALYSIS, echo=DEMO_ANALYSIS}
+ 
+mplong =  mpdata %>%
+  pivot_longer(cols=c(duration_count:duration_graze), names_to="Activity", values_to="Ind_Secs") %>% 
+  group_by(choice, Number, Activity, Type) %>% 
+  summarize_at(vars(Ind_Secs), funs(mean)) %>% 
+  ungroup()
+
+# # Find estimates for each model
+# # Total
+# mpel = as.data.frame(emmeans(els$best_count, ~Type), type = "response")
+# 
+# # Grazing
+# mpelg = as.data.frame(emmeans(els$best_graze, ~Type), type = "response")
+# 
+# # combine
+# mpnewci = rbind(mpel,mpelg)
+# 
+# # add labels and format them correctly
+# mpnewci$choice = c(rep("ELEPHANT",4))
+# mpnewci$Activity = c(rep("duration_count",2), rep("duration_graze",2))
+# mpnewci$Activity = factor(mpnewci$Activity, levels=c("duration_count","duration_graze"))
+
+#facet_names_mp = c("Total", "Grazing")
+#names(facet_names_mp) = c("duration_count", "duration_graze")
+
+mpnewci2 = mplong %>% 
+  filter(choice=="ELEPHANT") %>% 
+  filter(Activity =="duration_graze") %>% 
+  Rmisc::summarySE(.,groupvars=c("choice","Type"), measurevar = "Ind_Secs")
+
+
+mpnewci2$Type= factor(mpnewci2$Type, levels=c("CONT", "WH"))
+mpnewci2$choice = factor(mpnewci2$choice, levels=c("ELEPHANT"))
+
+# Create plot
+mp_activity = ggplot(mpnewci2,
+                     aes(x=choice, y=Ind_Secs, col=Type))+
+  geom_errorbar(aes(ymin = Ind_Secs-se, ymax = Ind_Secs+se),
+                position = position_dodge(width=0.3),
+                width=0.3,
+                size=1.1)+
+  geom_point(position = position_dodge(width=0.3), size=1.5)+
+  geom_point(data=mplong[which(mplong$choice=="ELEPHANT"),],
+             aes(x=choice, y=Ind_Secs+0.01, col=Type),
+             size=0.9,
+             alpha=0.4,
+             position=position_dodge(width=0.3))+
+  scale_color_manual(values=c("orangered", "steelblue3"))+
+  labs(x="Species", y="Daily Grazing Activity (individuals x seconds)")+
+  scale_y_log10()+
+  theme_bw(base_size = 14)+
+    guides(col=F)+
+  theme(axis.text.x = element_text(angle=90))
+
+mp_activity
+
+
+```
+
+### 1.3.2 Ol Pejeta comparison between pans and matrix sites
+
+#### 1.3.2.1 Create analyze function
+
+```{r, include=F}
+
+analyze_op_cont = function(species, df){
+  eledat = df %>% 
+      filter(choice==species, Treatment %in% c("WPC", "CONT"))
+  eledat$status = factor(eledat$status, levels=c("Pre", "During", "Post"))
+
+  nbinom2 = glmmTMB(dcount ~ Treatment + (1|Location)+(1|Month), data=eledat, family="nbinom2")
+  poisson = glmmTMB(dcount ~ Treatment + (1|Location)+(1|Month), data=eledat, family="poisson")
+  tweedie = glmmTMB(dcount ~ Treatment + (1|Location)+(1|Month), data=eledat, family="tweedie")
+
+  comp = as.data.frame(bbmle::AICctab(nbinom2, poisson, tweedie))
+  
+  bestfam = get(rownames(comp)[1])
+  sc = summary(bestfam)
+  
+  # no selection this time
+  elemodc = bestfam
+
+  # check resids
+  rescheck = testResiduals(simulateResiduals(elemodc), plot=F)
+  resdf = data.frame(model="duration_count", uniformity=rescheck$uniformity$p.value, dispersion = rescheck$dispersion$p.value, outliers=rescheck$outliers$p.value)
+  
+  
+  #repeat for grazing
+  nbinom2 = glmmTMB(dgraze ~ Treatment + (1|Location)+(1|Month), data=eledat, family="nbinom2")
+  poisson = glmmTMB(dgraze ~ Treatment+ (1|Location)+(1|Month), data=eledat, family="poisson")
+  tweedie = glmmTMB(dgraze ~ Treatment + (1|Location)+(1|Month), data=eledat, family="tweedie")
+  
+  comp2 = as.data.frame(bbmle::AICctab(nbinom2, poisson, tweedie))
+  
+  bestfam = get(rownames(comp2)[1])
+  sc = summary(bestfam)
+  
+  elemodg = bestfam
+  
+  # check resids
+  rescheck = testResiduals(simulateResiduals(elemodg), plot=F)
+  resdf2 = data.frame(model="duration_graze", uniformity=rescheck$uniformity$p.value, dispersion = rescheck$dispersion$p.value, outliers=rescheck$outliers$p.value)
+
+  
+  #repeat for drinking
+  nbinom2 = glmmTMB(ddrink ~ Treatment+ (1|Location)+(1|Month), data=eledat, family="nbinom2")
+  poisson = glmmTMB(ddrink ~ Treatment + (1|Location)+(1|Month), data=eledat, family="poisson")
+  tweedie = glmmTMB(ddrink ~ Treatment+ (1|Location)+(1|Month), data=eledat, family="tweedie")
+  
+  
+  comp3 = as.data.frame(bbmle::AICctab(nbinom2, poisson, tweedie))
+  
+  bestfam = get(rownames(comp3)[1])
+  sc = summary(bestfam)
+  
+  elemodd = bestfam
+  
+  # check resids
+  rescheck = testResiduals(simulateResiduals(elemodd), plot=F)
+  resdf3 = data.frame(model="duration_drink", uniformity=rescheck$uniformity$p.value, dispersion = rescheck$dispersion$p.value, outliers=rescheck$outliers$p.value)
+  
+  resdf = rbind(resdf, resdf2, resdf3)
+  
+  
+    #print(tab_model(elemodc, elemodg, show.ci=F, show.stat=T, show.se=T, transform = NULL))
+    return(list(family_count = comp, family_graze = comp2, family_drink = comp3, best_count = elemodc, best_graze=elemodg, best_drink=elemodd, residual_diagnostics = resdf, species_df = eledat))
+}
+
+```
+
+
+#### 1.3.2.2 Analyze differences between WPC and matrix sites
+```{r, echo=FALSE, results="hide", eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+allOPc = analyze_op_cont("ALL", allop)
+eleopc = analyze_op_cont("ELEPHANT", opdata)
+cowopc = analyze_op_cont("CATTLE", opdata)
+zebopc = analyze_op_cont("ZEBRA", opdata)
+bufopc = analyze_op_cont("BUFFALO", opdata)
+giropc = analyze_op_cont("GIRAFFE", opdata)
+impopc = analyze_op_cont("IMPALA", opdata)
+
+
+```
+
+#### 1.3.2.3 Plot results
+
+```{r,eval=FULL_ANALYSIS, echo=FULL_ANALYSIS}
+
+oplong =  opdata %>%
+  pivot_longer(cols=c(dcount:dgraze), names_to="Activity", values_to="Ind_Secs") %>% 
+  filter(status == "During", Treatment %in% c("WPC", "CONT")) %>% 
+  group_by(choice, Location, Activity, Treatment) %>% 
+  summarize_at(vars(Ind_Secs), funs(mean)) %>% 
+  ungroup()
+
+oplong = oplong[-which(oplong$Activity=="ddrink"),]
+oplong$Activity = factor(oplong$Activity, levels=c("dcount", "dgraze", "ddrink"))
+oplong$choice = factor(oplong$choice, levels=c("ELEPHANT", "ZEBRA", "CATTLE", "BUFFALO", "IMPALA", "GIRAFFE"))
+
+# 
+# # Total
+# el2 = as.data.frame(emmeans(eleopc$best_count, ~ Treatment, type = "response"))
+# cow2 = as.data.frame(emmeans(cowopc$best_count, ~Treatment, type = "response"))
+# zeb2 = as.data.frame(emmeans(zebopc$best_count, ~Treatment, type = "response"))
+# buf2 = as.data.frame(emmeans(bufopc$best_count, ~Treatment, type = "response"))
+# imp2 = as.data.frame(emmeans(impopc$best_count, ~Treatment, type = "response"))
+# gir2 = as.data.frame(emmeans(giropc$best_count, ~Treatment, type = "response"))
+# 
+# # Grazing
+# el2g = as.data.frame(emmeans(eleopc$best_graze, ~Treatment, type = "response"))
+# cow2g = as.data.frame(emmeans(cowopc$best_graze, ~Treatment, type = "response"))
+# zeb2g = as.data.frame(emmeans(zebopc$best_graze, ~Treatment, type = "response"))
+# buf2g = as.data.frame(emmeans(bufopc$best_graze, ~Treatment, type = "response"))
+# imp2g = as.data.frame(emmeans(impopc$best_graze, ~Treatment, type = "response"))
+# gir2g = as.data.frame(emmeans(giropc$best_graze, ~Treatment, type = "response"))
+# 
+# # Combine
+# newci = rbind(el2,cow2,zeb2,buf2,imp2,gir2,el2g, cow2g, zeb2g, buf2g, imp2g, gir2g)
+# 
+# # Format and add labels
+# newci$choice = rep( c(rep("ELEPHANT",2),rep("CATTLE",2),rep("ZEBRA",2),rep("BUFFALO",2),rep("IMPALA",2), rep("GIRAFFE",2)), 2)
+# newci$Activity = c(rep("dcount",12), rep("dgraze",12))
+# newci$choice = factor(newci$choice, levels = c("ELEPHANT", "ZEBRA", "CATTLE", "BUFFALO", "IMPALA", "GIRAFFE"))
+
+newci2 = oplong %>% 
+  filter(Activity=="dgraze") %>% 
+  Rmisc::summarySE(., groupvars = c("choice","Treatment"), measurevar = "Ind_Secs")
+
+op_activity = ggplot(oplong[which(oplong$Activity=="dgraze"),],
+                     aes(x=choice,
+                         y=Ind_Secs+1))+
+  geom_errorbar(data=newci2,
+                aes(x=choice, y=Ind_Secs, col=Treatment,
+                    ymin=Ind_Secs-se, ymax=Ind_Secs+se),
+                position = position_dodge(width=0.4),
+                width=0.3,
+                size=1.1)+
+ geom_point(data=newci2,
+            aes(x=choice, y=Ind_Secs, col=Treatment),
+            position=position_dodge(width=0.4),
+            size=1.5)+
+ geom_point(data=oplong,
+            aes(x=choice, y=Ind_Secs, col=Treatment),
+            size=0.9,
+            alpha=0.2,
+            position=position_dodge(width=0.4))+
+  scale_color_manual(values=c("orangered", "#2A5675", "#42B889"))+
+  scale_y_log10(breaks=c(0.01,1,100,10000), limits=c(0.01,10100))+
+  theme_bw(base_size = 14)+
+  guides(col=F)+
+  theme(axis.text.x = element_text(angle=90))
+
+
+op_activity
+
+#ggsave("fig2_panelE2.png", op_activity, device="png", dpi=300, width=6, height=4)
+
+```
+
+
+# 2. Parasite Exposures
+
+
+## 2.1 Create Survival Scenarios
+
+```{r}
+
+survival = data.frame(scenario =c("Very High", "High", "Equal", "Low"), relative_mortality = c(10, 2, 1, 0.5))
+
+surv = ggplot(survival, aes(x=reorder(scenario, relative_mortality), y=relative_mortality))+
+  geom_col(aes(fill=as.factor(relative_mortality)), alpha=0.8)+
+  scale_fill_manual(values=c("steelblue4","gray","orangered","red4"))+
+  theme_bw(base_size = 20)+
+  geom_hline(yintercept = 1, size=1, linetype="dashed")+
+  guides(fill=F)+
+  labs(x="Scenario", y="Mortality at water relative to matrix")
+
+surv
+
+
+```
+
+## 2.2 Combine parasite density data to calculate exposure risk
+
+### 2.2.1 Mpala (Observational) Exposures
+
+#### 2.2.1.1 Read in data and calculate risk
+
+```{r}
+# Import egg density data
+mpegg = read.csv("MPALAdata.csv")
+
+# Median egg count and prevalence multiplied (this is the same code as in egg density analyses)
+mpegg$Emult <- 540 *0.58* mpegg$Elephant 
+mpegg$Bmult <- 20 *0.95* mpegg$Buffalo 
+mpegg$Cmult <- 255 *0.95* mpegg$Cow 
+mpegg$Zmult <- 820 *0.79* mpegg$Zebra 
+mpegg$Imult <- 125 *1.66* mpegg$Impala 
+mpegg$Gmult <- 1 *1.66* mpegg$Giraffe 
+
+
+# Calculate mean egg density per m2 for each species:
+mpegg_agg = mpegg %>% dplyr::select(Treatment,Site, Emult:Gmult) %>% 
+  group_by(Treatment, Site) %>% 
+  summarize_at(vars(Emult:Gmult), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+# Format
+names(mpegg_agg) = c("Type", "Number", "ELEPHANT", "BUFFALO", "CATTLE", "ZEBRA", "IMPALA", "GIRAFFE")
+mpegg_aggl = mpegg_agg %>% 
+  pivot_longer(cols=c(ELEPHANT:GIRAFFE), names_to="choice", values_to="parasite_density")
+
+
+# Herbivore behavior
+mplong =  mpdata %>%
+  pivot_longer(cols=c(duration_count:duration_graze), names_to="Activity", values_to="Ind_Secs") %>% 
+  group_by(choice, Number, Activity, Type) %>% 
+  summarize_at(vars(Ind_Secs), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+
+# Combine datasets
+mprisk = left_join(mpegg_aggl, mplong)
+
+# Calculate contacts with no survival considerations
+mprisk$risk = mprisk$parasite_density * mprisk$Ind_Secs
+
+# Grazing activity for sites with data
+mprisk2 = mprisk %>%
+  filter(Number > 0) %>% 
+  dplyr::select(Type, Number, Activity, choice, risk) %>%
+  filter(Activity=="duration_graze")
+
+# No buffalo risk at CONTs -- add nominal amount: calculated by using the same ratio as the counts
+mprisk2[which(mprisk2$choice=="BUFFALO" & mprisk2$Type=="CONT"),]$risk = 8.8
+
+# Parasite survival scenarios
+mprisk2$risk2 = ifelse(mprisk2$Type=="WH", mprisk2$risk/0.5, mprisk2$risk)
+mprisk2$risk0.5 = ifelse(mprisk2$Type=="WH", mprisk2$risk/2, mprisk2$risk)
+mprisk2$risk0.1 = ifelse(mprisk2$Type=="WH", mprisk2$risk/10, mprisk2$risk)
+
+```
+
+#### 2.2.1.2 Create GLMMs for different survival scenarios {.tabset}
+
+##### Equal
+```{r}
+modmp = glmmTMB(risk~choice*Type + (1|Number), data=mprisk2, family="tweedie")
+emmp = emmeans(modmp, ~Type |choice, type="response")
+#DHARMa::testResiduals(simulateResiduals(modmp))
+mpps1 = as.data.frame(pairs(emmp, reverse = T))
+mpps1$p2 = p.adjust(mpps1$p.value, method="holm")
+mpps1$Scenario = "Equal"
+```
+
+
+##### High
+
+```{r}
+
+# Model species-specific differences 
+modmp = glmmTMB(risk0.5~choice*Type + (1|Number), data=mprisk2, family="tweedie")
+#DHARMa::testResiduals(simulateResiduals(modmp))
+emmp = emmeans(modmp, ~Type |choice, type="response")
+mpps0.5 = as.data.frame(pairs(emmp, reverse = T))
+mpps0.5$p2 = p.adjust(mpps0.5$p.value, method="holm")
+mpps0.5$Scenario = "High"
+
+```
+
+##### Very High
+```{r}
+modmp = glmmTMB(risk0.1~choice*Type + (1|Number), data=mprisk2, family="tweedie")
+#DHARMa::testResiduals(simulateResiduals(modmp))
+emmp = emmeans(modmp, ~Type |choice, type="response")
+mpps0.1 = as.data.frame(pairs(emmp, reverse = T))
+mpps0.1$p2 = p.adjust(mpps0.1$p.value, method="holm")
+mpps0.1$Scenario = "Very High"
+
+```
+
+##### Low
+```{r}
+modmp = glmmTMB(risk2~choice*Type + (1|Number), data=mprisk2, family="tweedie")
+#DHARMa::testResiduals(simulateResiduals(modmp))
+emmp = emmeans(modmp, ~Type |choice, type="response")
+mpps2.0 = as.data.frame(pairs(emmp, reverse = T))
+mpps2.0$p2 = p.adjust(mpps2.0$p.value, method="holm")
+mpps2.0$Scenario = "Low"
+
+```
+
+#### 2.2.1.3 Plot Results
+
+```{r}
+# Combine results
+mpps = rbind(mpps0.1, mpps0.5, mpps1, mpps2.0)
+mpps$Scenario = factor(mpps$Scenario, levels=rev(c("Low","Equal", "High", "Very High")))
+
+# Plot
+tmis = ggplot(mpps,
+              aes(x=reorder(choice,-ratio), y=Scenario))+
+  geom_tile(aes(fill=log(ratio)),
+            alpha=0.9,
+            col=ifelse(mpps$p2 < 0.1, "black", NA),
+            size=1, 
+            linetype = ifelse(mpps$p2 <0.05, "solid",
+                              ifelse(mpps$p2 < 0.1, "dotdash", "solid")))+
+  geom_text(aes(label=ifelse(ratio>1, round(ratio,0),
+                             ifelse(ratio < 0.1, round(ratio,2), round(ratio,1)))),
+            col = ifelse(mpps$ratio>25, "white", "black"),
+            size=10)+
+  scale_fill_gradient2(low="dodgerblue", mid="white", high="red4")+
+  theme_bw(base_size=16)+
+  guides(fill=F)+
+  labs(x="", y="Relative mortality near water")
+
+tmis
+
+
+```
+
+### 2.2.2 Ol Pejeta (Experimental) Exposures
+
+#### 2.2.2.1 Read in data and calculate exposures
+
+```{r}
+# Read in data
+opegg = read.csv("OPCdata.csv")
+
+# Multiply by the median egg count and prevalence (same code as for egg density analyses)
+opegg$Emult <- 540*0.58*opegg$Elephant
+opegg$Bmult <- 20*0.95 * opegg$Buffalo 
+opegg$Cmult <- 255*0.95 * opegg$Cow 
+opegg$Zmult <- 820*0.79 * opegg$Zebra 
+opegg$Imult <- 125*1.66 * opegg$Impala
+opegg$Gmult <- 1*1.66 * opegg$Giraffe
+
+
+# calculate mean egg density per m2 for each species:
+opegg_agg = opegg %>% select(Treatment,Site,Emult:Gmult) %>% 
+  group_by(Treatment, Site) %>% 
+  summarize_at(vars(Emult:Gmult), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+# format and organize
+names(opegg_agg) = c("Treatment", "Site","ELEPHANT", "BUFFALO", "CATTLE", "ZEBRA", "IMPALA", "GIRAFFE")
+opegg_aggl = opegg_agg %>% 
+  pivot_longer(cols=c(ELEPHANT:GIRAFFE), names_to="choice", values_to="parasite_density")
+
+# herbivore data -- mean for each location treatment across all periods
+oplong =  opdata %>%
+  pivot_longer(cols=c(dcount:dgraze), names_to="Activity", values_to="Ind_Secs") %>% 
+  group_by(choice, Location, Activity, Treatment) %>% 
+  summarize_at(vars(Ind_Secs), funs(mean(., na.rm=T))) %>% 
+  ungroup()
+
+names(oplong)[c(2)]=c("Site")
+
+# combine
+oprisk = left_join(opegg_aggl, oplong)
+
+# calculate contacts
+oprisk$risk = oprisk$parasite_density * oprisk$Ind_Secs
+oprisk$risk0.5 = ifelse(oprisk$Treatment=="WPC", oprisk$risk/2, oprisk$risk)
+oprisk$risk0.1 = ifelse(oprisk$Treatment=="WPC", oprisk$risk/10, oprisk$risk)
+oprisk$risk2 = ifelse(oprisk$Treatment=="WPC", oprisk$risk/0.5, oprisk$risk)
+
+oprisk2 = oprisk %>%
+  filter(Activity=="dgraze", Treatment %in% c("WPC", "CONT"))
+
+```
+
+#### 2.2.2.2 Create GLMMs for different survival scenarios {.tabset}
+
+##### Equal
+```{r}
+mod= glmmTMB(risk~Treatment*choice + (1|Site), data=oprisk2, family="tweedie")
+#DHARMa::testResiduals(simulateResiduals(modmp))
+emmp = emmeans(mod, ~Treatment |choice, type="response")
+opps1 = as.data.frame(pairs(emmp, reverse = T))
+opps1$p2 = p.adjust(opps1$p.value, method="holm")
+opps1$Scenario = "Equal"
+```
+
+##### High
+```{r}
+mod = glmmTMB(risk0.5~Treatment*choice + (1|Site), data=oprisk2, family="tweedie")
+#DHARMa::testResiduals(simulateResiduals(modmp)) # same diagnostics for nbinom2
+emmp = emmeans(mod, ~Treatment|choice, type="response")
+opps0.5 = as.data.frame(pairs(emmp, reverse = T))
+opps0.5$p2 = p.adjust(opps0.5$p.value, method="holm")
+opps0.5$Scenario = "High"
+```
+
+##### Very High
+```{r}
+mod= glmmTMB(risk0.1~Treatment*choice + (1|Site), data=oprisk2, family="tweedie")
+#DHARMa::testResiduals(simulateResiduals(modmp))
+emmp = emmeans(mod, ~Treatment |choice, type="response")
+opps0.1 = as.data.frame(pairs(emmp, reverse = T))
+opps0.1$p2 = p.adjust(opps0.1$p.value, method="holm")
+opps0.1$Scenario = "Very High"
+
+```
+
+##### Low
+```{r}
+mod= glmmTMB(risk2~Treatment*choice + (1|Site), data=oprisk2, family="tweedie")
+#DHARMa::testResiduals(simulateResiduals(modmp))
+emmp = emmeans(mod, ~Treatment |choice, type="response")
+opps2.0 = as.data.frame(pairs(emmp, reverse = T))
+opps2.0$p2 = p.adjust(opps2.0$p.value, method="holm")
+opps2.0$Scenario = "Low"
+
+```
+
+
+#### 2.2.2.3 Plot Results
+
+```{r}
+# Combine
+opps = rbind(opps0.1, opps0.5, opps1, opps2.0)
+opps$Scenario = factor(opps$Scenario, levels=rev(c("Low","Equal", "High", "Very High")))
+
+optmis = ggplot(opps,
+                aes(x=reorder(choice,-ratio), y=Scenario))+
+  geom_tile(aes(fill=log(ratio)),
+            alpha=0.9,
+            col=ifelse(opps$p2 < 0.1, "black", NA),
+            size=1, 
+            linetype = ifelse(opps$p2 <0.05, "solid",
+                              ifelse(opps$p2 < 0.1, "dotdash", "solid")))+
+  geom_text(aes(label=ifelse(ratio>1, round(ratio,0),
+                             ifelse(ratio < 0.1, round(ratio,2), round(ratio,1)))),
+            col = ifelse(opps$ratio>25, "white", "black"),
+            size=10)+
+  scale_fill_gradient2(low="dodgerblue", mid="white", high="red4")+
+  theme_bw(base_size=16)+
+  guides(fill=F)+
+  labs(x="", y="Relative mortality near water")
+
+optmis
+
+
+```
+
+### 2.3 Create Results Tables
+
+#### 2.3.1 Mpala
+
+```{r}
+
+mptab = mpps[,-1] %>%
+  arrange(choice,desc(Scenario)) %>%
+  mutate_at(vars(ratio, SE, t.ratio), funs(round(.,2))) %>% 
+  mutate_at(vars(p.value, p2), funs(round(.,3))) %>%
+  mutate_at(vars(choice), funs(tolower)) %>% 
+  mutate_at(vars(choice), funs(str_to_title)) %>% 
+  mutate_at(vars(p.value, p2), funs(ifelse(.<0.001, "<0.001", .))) %>% 
+  mutate_at(vars(p.value, p2), funs(ifelse(.=="1", "1.00", .))) %>% 
+  relocate(Scenario, .after = choice) %>% 
+  flextable()
+
+mptab = align(mptab, align="center", part="all") %>% 
+  merge_v(j="choice") %>% 
+  set_header_labels(choice = "Species", ratio="Transmission ratio", SE = "SE", df = "df",  t.ratio="T ratio", p.value = "Unadjusted p", p2 = "Adjusted p", Scenario="Scenario") %>%
+  color(i=~p2<0.05, j="ratio", color="red") %>% 
+  fontsize(size=10 , part="all") %>% 
+  font(fontname = "Times New Roman", part = "all") %>%
+  style(i= ~p2 < 0.1, j="ratio", pr_t=officer::fp_text(color="red", font.family = "Times New Roman")) %>%
+  style(i= ~p2 < 0.05, j="ratio", pr_t=officer::fp_text(color="red", bold=TRUE, font.family = "Times New Roman"))
+
+
+flextable:::knit_print.flextable(mptab)
+print(mptab, preview="html")
+```
+
+#### 2.3.2 Ol Pejeta
+```{r}
+optab = opps[,-1] %>%
+  arrange(choice,desc(Scenario)) %>% 
+  mutate_at(vars(ratio, SE, t.ratio), funs(round(.,2))) %>% 
+  mutate_at(vars(p.value, p2), funs(round(.,3))) %>%
+  mutate_at(vars(choice), funs(tolower)) %>% 
+  mutate_at(vars(choice), funs(str_to_title)) %>% 
+  mutate_at(vars(p.value, p2), funs(ifelse(.<0.001, "<0.001", .))) %>% 
+  mutate_at(vars(p.value, p2), funs(ifelse(.=="1", "1.00", .))) %>% 
+  relocate(Scenario, .after = choice) %>% 
+  flextable()
+
+optab = align(optab, align="center", part="all") %>% 
+  merge_v(j="choice") %>% 
+  fontsize(size=10, part="all") %>%
+  font(fontname = "Times New Roman", part = "all") %>% 
+  style(i= ~p2 < 0.1, j="ratio", pr_t=officer::fp_text(color="red", font.family = "Times New Roman")) %>% 
+  style(i= ~p2 < 0.05, j="ratio", pr_t=officer::fp_text(color="red", bold=TRUE, font.family = "Times New Roman")) %>% 
+  set_header_labels(choice = "Species", ratio="Transmission ratio", SE = "SE", df = "df",  t.ratio="T ratio", p.value = "Unadjusted p", p2 = "Adjusted p", Scenario="Scenario") %>% 
+  color(i=~p2<0.05, j="ratio", color="red")
+
+
+flextable:::knit_print.flextable(optab)
+
+print(optab,preview="html")
+```
+
+
